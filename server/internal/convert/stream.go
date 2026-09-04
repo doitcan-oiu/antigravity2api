@@ -359,3 +359,104 @@ func writeSSE(w io.Writer, payload any) error {
 func toolIndexGuess(toolCalls []any) bool {
 	return len(toolCalls) > 0
 }
+
+func CollectGeminiJSON(src io.Reader) ([]byte, error) {
+	reader := bufio.NewReader(src)
+	var buf bytes.Buffer
+	var parts []any
+	var usage any
+	finish := "STOP"
+	sawChunk := false
+	var leftover bytes.Buffer
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
+		if line != "" {
+			buf.WriteString(line)
+			leftover.WriteString(line)
+		}
+		for {
+			chunk, _, ok := takeSSE(&buf)
+			if !ok {
+				break
+			}
+			payload, ok := parseGeminiChunk(chunk)
+			if !ok {
+				continue
+			}
+			sawChunk = true
+			if u := payload["usageMetadata"]; u != nil {
+				usage = u
+			}
+			cands := AsSlice(payload["candidates"])
+			if len(cands) == 0 {
+				continue
+			}
+			cand := AsMap(cands[0])
+			if cand == nil {
+				continue
+			}
+			if fr := AsString(cand["finishReason"]); fr != "" {
+				finish = fr
+			}
+			content := AsMap(cand["content"])
+			if content == nil {
+				continue
+			}
+			for _, p := range AsSlice(content["parts"]) {
+				part := AsMap(p)
+				if part == nil {
+					continue
+				}
+				text := AsString(part["text"])
+				if text != "" && part["functionCall"] == nil {
+					thought, _ := part["thought"].(bool)
+					if len(parts) > 0 {
+						last := AsMap(parts[len(parts)-1])
+						if last != nil && last["functionCall"] == nil && AsString(last["text"]) != "" {
+							lastThought, _ := last["thought"].(bool)
+							if lastThought == thought {
+								last["text"] = AsString(last["text"]) + text
+								parts[len(parts)-1] = last
+								continue
+							}
+						}
+					}
+				}
+				parts = append(parts, part)
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+	}
+	if !sawChunk {
+		raw := bytes.TrimSpace(leftover.Bytes())
+		if len(raw) == 0 {
+			return nil, fmt.Errorf("empty upstream stream")
+		}
+		if json.Valid(raw) {
+			if unwrapped, err := UnwrapGemini(raw); err == nil {
+				return unwrapped, nil
+			}
+			return raw, nil
+		}
+		return nil, fmt.Errorf("invalid upstream stream")
+	}
+	out := map[string]any{
+		"candidates": []any{map[string]any{
+			"content": map[string]any{
+				"role":  "model",
+				"parts": parts,
+			},
+			"finishReason": finish,
+			"index":        0,
+		}},
+	}
+	if usage != nil {
+		out["usageMetadata"] = usage
+	}
+	return json.Marshal(out)
+}

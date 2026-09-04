@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wo/antigravity2api/internal/config"
+	"github.com/wo/antigravity2api/internal/convert"
 	"github.com/wo/antigravity2api/internal/models"
 	"github.com/wo/antigravity2api/internal/outbound"
 )
@@ -96,7 +97,7 @@ func (c *Client) call(ctx context.Context, method, accessToken string, payload a
 			if stripProject {
 				req.Header.Del("x-goog-user-project")
 			}
-			resp, err := c.client().Do(req)
+			resp, err := c.out.Do(req)
 			if err != nil {
 				lastErr = err
 				continue
@@ -149,6 +150,9 @@ func (c *Client) applyHeaders(req *http.Request, accessToken, method string, pay
 		if proj := payloadProject(payload); proj != "" {
 			req.Header.Set("x-goog-user-project", proj)
 		}
+	}
+	if model := payloadModel(payload); strings.Contains(strings.ToLower(model), "claude") {
+		req.Header.Set("anthropic-beta", "claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14")
 	}
 }
 
@@ -310,12 +314,26 @@ func (c *Client) Generate(ctx context.Context, accessToken string, payload any, 
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	resp, err := c.Stream(ctx, "streamGenerateContent", accessToken, payload, "alt=sse")
+	if err != nil {
+		return nil, nil, err
+	}
 	if stream {
-		resp, err := c.Stream(ctx, "streamGenerateContent", accessToken, payload, "alt=sse")
+		return resp, nil, nil
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
 		return resp, nil, err
 	}
-	resp, data, err := c.doJSON(ctx, "generateContent", accessToken, payload, "")
-	return resp, data, err
+	if resp.StatusCode >= 400 {
+		return resp, data, nil
+	}
+	collected, err := convert.CollectGeminiJSON(bytes.NewReader(data))
+	if err != nil {
+		return resp, data, err
+	}
+	return resp, collected, nil
 }
 
 type noLenReader struct{ r io.Reader }
@@ -328,6 +346,19 @@ func requestBody(body []byte, chunked bool) io.Reader {
 		return noLenReader{r}
 	}
 	return r
+}
+
+func payloadModel(payload any) string {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return ""
+	}
+	s, _ := m["model"].(string)
+	return strings.TrimSpace(s)
 }
 
 func payloadProject(payload any) string {

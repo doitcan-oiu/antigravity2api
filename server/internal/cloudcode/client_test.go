@@ -68,6 +68,12 @@ func TestApplyHeaders(t *testing.T) {
 	if content.Header.Get("x-goog-user-project") != "" {
 		t.Fatal("content request must omit x-goog-user-project")
 	}
+
+	claude, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
+	c.applyHeaders(claude, "tok", "streamGenerateContent", map[string]any{"model": "claude-sonnet-4-5"})
+	if claude.Header.Get("anthropic-beta") == "" {
+		t.Fatal("claude request should send anthropic-beta")
+	}
 }
 
 func TestChunkedBodyHasNoLen(t *testing.T) {

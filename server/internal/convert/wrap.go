@@ -26,8 +26,8 @@ type OuterRequest struct {
 	Model              string `json:"model"`
 	UserAgent          string `json:"userAgent"`
 	RequestType        string `json:"requestType"`
-	EnabledCreditTypes any    `json:"enabledCreditTypes,omitempty"`
 	RequestID          string `json:"requestId"`
+	EnabledCreditTypes any    `json:"enabledCreditTypes,omitempty"`
 }
 
 func SafetyOff() []map[string]string {

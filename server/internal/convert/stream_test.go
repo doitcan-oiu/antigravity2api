@@ -2,6 +2,7 @@ package convert
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -33,4 +34,30 @@ func TestCompletionTokensFromGemini(t *testing.T) {
 	if u.Output != 8 || u.Input != 3 {
 		t.Fatalf("got %#v", u)
 	}
+}
+
+func TestCollectGeminiJSON(t *testing.T) {
+	src := strings.NewReader("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hel\"}]}}]}}\n\ndata: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"lo\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":2}}}\n\n")
+	raw, err := CollectGeminiJSON(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _, _, finish, usage := collectParts(mustMap(raw))
+	if text != "hello" {
+		t.Fatalf("text %q", text)
+	}
+	if finish != "STOP" {
+		t.Fatalf("finish %s", finish)
+	}
+	if usage == nil {
+		t.Fatal("missing usage")
+	}
+}
+
+func mustMap(raw []byte) map[string]any {
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		panic(err)
+	}
+	return m
 }

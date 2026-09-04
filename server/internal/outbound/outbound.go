@@ -47,6 +47,36 @@ func (m *Manager) Client(timeout time.Duration) *http.Client {
 	}
 }
 
+func (m *Manager) Do(req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, fmt.Errorf("nil request")
+	}
+	m.mu.RLock()
+	c := m.client
+	m.mu.RUnlock()
+	rr := c.R().SetContext(req.Context()).DisableAutoReadResponse()
+	for k, vs := range req.Header {
+		if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Transfer-Encoding") {
+			continue
+		}
+		if len(vs) == 0 {
+			continue
+		}
+		rr.SetHeader(k, vs[0])
+	}
+	if req.Body != nil {
+		rr.SetBody(req.Body)
+	}
+	resp, err := rr.Send(req.Method, req.URL.String())
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || resp.Response == nil {
+		return nil, fmt.Errorf("empty upstream response")
+	}
+	return resp.Response, nil
+}
+
 func (m *Manager) Apply(enabled bool, raw string) error {
 	raw = Normalize(raw)
 	if !enabled {
@@ -102,6 +132,7 @@ func parseProxyURL(raw string) (*url.URL, error) {
 func newChromeClient(proxyRaw string) *req.Client {
 	c := req.C().
 		SetTimeout(0).
+		DisableAutoReadResponse().
 		SetTLSFingerprint(utls.HelloChrome_120).
 		SetHTTP2SettingsFrame(
 			http2.Setting{ID: http2.SettingHeaderTableSize, Val: 65536},
