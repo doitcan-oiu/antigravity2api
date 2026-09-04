@@ -354,13 +354,6 @@ func (p *Pool) ensureFresh(acc *models.Account) error {
 	return p.store.UpdateAccount(acc)
 }
 
-func (p *Pool) MarkRateLimited(id, errMsg string, seconds int) {
-	if seconds <= 0 {
-		seconds = 60
-	}
-	_ = p.store.MarkRateLimited(id, time.Now().Unix()+int64(seconds), errMsg)
-}
-
 func maskToken(t string) string {
 	if len(t) <= 10 {
 		return t

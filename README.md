@@ -11,7 +11,7 @@
 - 兼容 OpenAI `/v1/chat/completions`、`/v1/responses`、Claude `/v1/messages`、Gemini `/v1beta/models/*`
 - 转换成 Cloud Code `v1internal` 的 `generateContent` / `streamGenerateContent`
 - 支持流式、工具调用、thinking
-- 账号轮询，自动跳过停用、过期、限流账号，429 时换号重试
+- 账号轮询，自动跳过停用和过期账号，429 时换号重试，不冻结该账号
 - 批次导入，可手动选择购买日期，到期时间 = 购买日 + 30 天
 - 独立配额：OSS、Gemini Pro、Gemini Flash、Claude
 

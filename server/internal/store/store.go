@@ -390,8 +390,8 @@ SELECT a.id, a.batch_id, b.name, a.email, a.name, a.refresh_token, a.access_toke
        a.project_id, a.subscription_tier, a.quota_json, a.disabled, a.disabled_reason, a.last_used, a.last_error,
        a.rate_limited_until, a.created_at, b.expires_at
 FROM accounts a JOIN batches b ON a.batch_id = b.id
-WHERE a.disabled = 0 AND COALESCE(a.rate_limited_until, 0) <= ?`
-	args := []any{now}
+WHERE a.disabled = 0`
+	args := []any{}
 	if skipExpired {
 		q += ` AND b.expires_at > ?`
 		args = append(args, now)

@@ -6,7 +6,6 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -166,8 +165,6 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, protocol, model s
 		}
 		if resp.StatusCode == 429 {
 			body := readBody()
-			wait := parseRetrySeconds(string(body))
-			s.pool.MarkRateLimited(acc.ID, clipErr(body), wait)
 			lastStatus = 429
 			lastErr = clipErr(body)
 			exclude[acc.ID] = struct{}{}
@@ -276,19 +273,6 @@ func (f *flushWriter) Write(p []byte) (int, error) {
 		f.f.Flush()
 	}
 	return n, err
-}
-
-var retryRe = regexp.MustCompile(`(?i)retry[- ]in["'=: ]+(\d+)`)
-
-func parseRetrySeconds(body string) int {
-	m := retryRe.FindStringSubmatch(body)
-	if len(m) == 2 {
-		n, _ := strconv.Atoi(m[1])
-		if n > 0 {
-			return n
-		}
-	}
-	return 60
 }
 
 func clipErr(b []byte) string {
