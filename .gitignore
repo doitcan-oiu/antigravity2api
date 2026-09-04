@@ -1,0 +1,25 @@
+# secrets & runtime data
+.env
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# original demo project, not part of this service
+demo/
+
+# dependencies
+node_modules/
+
+# generated frontend (built into server/web for go:embed)
+web/dist/
+server/web/
+web/tsconfig.tsbuildinfo
+
+# binaries
+antigravity2api
+server/antigravity2api
+*.exe
+
+# misc
+.DS_Store

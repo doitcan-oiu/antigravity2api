@@ -1,0 +1,291 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/wo/antigravity2api/internal/convert"
+	"github.com/wo/antigravity2api/internal/models"
+)
+
+func (s *Server) openaiModels(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{"object": "list", "data": convert.Catalog()})
+}
+
+func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
+	var req convert.OpenAIRequest
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, 400, map[string]any{"error": map[string]any{"message": err.Error()}})
+		return
+	}
+	s.proxy(w, r, "openai", req.Model, req.Stream, func(projectID, email, accountID string) (any, string, bool, error) {
+		outer, mapped, stream := convert.OpenAIToGemini(req, projectID, email, accountID)
+		return outer, mapped, stream, nil
+	}, func(mapped string, raw []byte) ([]byte, error) {
+		return convert.GeminiToOpenAI(mapped, raw, "chatcmpl-"+strconv.FormatInt(time.Now().UnixNano(), 36))
+	}, convert.WriteOpenAISSE)
+}
+
+func (s *Server) claudeMessages(w http.ResponseWriter, r *http.Request) {
+	var req convert.ClaudeRequest
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, 400, map[string]any{"error": map[string]any{"type": "invalid_request_error", "message": err.Error()}})
+		return
+	}
+	s.proxy(w, r, "claude", req.Model, req.Stream, func(projectID, email, accountID string) (any, string, bool, error) {
+		outer, mapped, stream := convert.ClaudeToGemini(req, projectID, email, accountID)
+		return outer, mapped, stream, nil
+	}, convert.GeminiToClaude, convert.WriteClaudeSSE)
+}
+
+func (s *Server) geminiList(w http.ResponseWriter, r *http.Request) {
+	models := convert.Catalog()
+	out := make([]any, 0, len(models))
+	for _, m := range models {
+		id, _ := m["id"].(string)
+		out = append(out, map[string]any{
+			"name":                       "models/" + id,
+			"version":                    "1.0",
+			"displayName":                id,
+			"supportedGenerationMethods": []string{"generateContent", "streamGenerateContent"},
+		})
+	}
+	writeJSON(w, 200, map[string]any{"models": out})
+}
+
+func (s *Server) geminiGenerate(w http.ResponseWriter, r *http.Request) {
+	model, action := convert.ParseModelPath(r.URL.Path)
+	stream := strings.Contains(strings.ToLower(action), "stream")
+	var body map[string]any
+	if r.Method == http.MethodGet {
+		writeJSON(w, 200, map[string]any{
+			"name":        "models/" + model,
+			"displayName": model,
+		})
+		return
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	if v, ok := body["stream"].(bool); ok && v {
+		stream = true
+	}
+	s.proxy(w, r, "gemini", model, stream, func(projectID, email, accountID string) (any, string, bool, error) {
+		outer, mapped, st := convert.NativeGeminiToInternal(body, model, projectID, email, accountID)
+		return outer, mapped, st || stream, nil
+	}, func(_ string, raw []byte) ([]byte, error) { return convert.UnwrapGemini(raw) }, func(dst io.Writer, _ string, src io.Reader) error {
+		return convert.WriteGeminiSSE(dst, src)
+	})
+}
+
+type buildFn func(projectID, email, accountID string) (payload any, mapped string, stream bool, err error)
+type toJSONFn func(mapped string, raw []byte) ([]byte, error)
+type toSSEFn func(dst io.Writer, model string, src io.Reader) error
+
+func (s *Server) proxy(w http.ResponseWriter, r *http.Request, protocol, model string, streamHint bool, build buildFn, toJSON toJSONFn, toSSE toSSEFn) {
+	start := time.Now()
+	exclude := map[string]struct{}{}
+	var lastStatus int
+	var lastErr string
+	var lastEmail, lastID, mapped string
+	stream := streamHint
+	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.RequestTimeout)
+	defer cancel()
+
+	for attempt := 0; attempt < 5; attempt++ {
+		if ctx.Err() != nil {
+			lastErr = "request canceled"
+			lastStatus = 499
+			break
+		}
+		acc, err := s.pool.Next(exclude)
+		if err != nil {
+			lastErr = err.Error()
+			lastStatus = http.StatusServiceUnavailable
+			break
+		}
+		lastID, lastEmail = acc.ID, acc.Email
+		payload, mappedModel, streamFlag, err := build(acc.ProjectID, acc.Email, acc.ID)
+		if err != nil {
+			lastErr = err.Error()
+			lastStatus = 400
+			break
+		}
+		mapped = mappedModel
+		stream = streamFlag || streamHint
+		resp, data, err := s.cc.Generate(ctx, acc.AccessToken, payload, stream)
+		if err != nil {
+			lastErr = err.Error()
+			lastStatus = 502
+			exclude[acc.ID] = struct{}{}
+			continue
+		}
+		readBody := func() []byte {
+			if data != nil {
+				return data
+			}
+			if resp.Body != nil {
+				b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+				resp.Body.Close()
+				return b
+			}
+			return nil
+		}
+		if resp.StatusCode == 429 {
+			body := readBody()
+			wait := parseRetrySeconds(string(body))
+			s.pool.MarkRateLimited(acc.ID, clipErr(body), wait)
+			lastStatus = 429
+			lastErr = clipErr(body)
+			exclude[acc.ID] = struct{}{}
+			continue
+		}
+		if resp.StatusCode == 401 || resp.StatusCode == 403 {
+			body := readBody()
+			lastStatus = resp.StatusCode
+			lastErr = clipErr(body)
+			exclude[acc.ID] = struct{}{}
+			if strings.Contains(strings.ToLower(string(body)), "invalid") {
+				_ = s.store.SetDisabled(acc.ID, true, "upstream unauthorized")
+			}
+			continue
+		}
+		if resp.StatusCode >= 500 {
+			body := readBody()
+			lastStatus = resp.StatusCode
+			lastErr = clipErr(body)
+			exclude[acc.ID] = struct{}{}
+			continue
+		}
+		if stream {
+			if resp.StatusCode >= 400 {
+				body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+				resp.Body.Close()
+				lastStatus = resp.StatusCode
+				lastErr = clipErr(body)
+				writeJSON(w, resp.StatusCode, map[string]any{"error": lastErr})
+				s.logReq(protocol, model, mapped, lastID, lastEmail, resp.StatusCode, true, start, lastErr)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			w.WriteHeader(200)
+			flusher, _ := w.(http.Flusher)
+			pw := &flushWriter{w: w, f: flusher}
+			if err := toSSE(pw, mapped, resp.Body); err != nil {
+				lastErr = err.Error()
+			}
+			resp.Body.Close()
+			s.logReq(protocol, model, mapped, lastID, lastEmail, 200, true, start, lastErr)
+			return
+		}
+		if resp.StatusCode >= 400 {
+			lastStatus = resp.StatusCode
+			lastErr = clipErr(data)
+			writeJSON(w, resp.StatusCode, map[string]any{"error": lastErr})
+			s.logReq(protocol, model, mapped, lastID, lastEmail, resp.StatusCode, false, start, lastErr)
+			return
+		}
+		out, err := toJSON(mapped, data)
+		if err != nil {
+			writeJSON(w, 502, map[string]any{"error": err.Error()})
+			s.logReq(protocol, model, mapped, lastID, lastEmail, 502, false, start, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(200)
+		_, _ = w.Write(out)
+		s.logReq(protocol, model, mapped, lastID, lastEmail, 200, false, start, "")
+		return
+	}
+
+	if lastStatus == 0 {
+		lastStatus = 503
+	}
+	if lastErr == "" {
+		lastErr = "no available accounts"
+	}
+	writeJSON(w, lastStatus, map[string]any{"error": lastErr})
+	s.logReq(protocol, model, mapped, lastID, lastEmail, lastStatus, stream, start, lastErr)
+}
+
+func (s *Server) loggingEnabled() bool {
+	return s.store.BoolSetting("enable_logging", true)
+}
+
+func (s *Server) logReq(protocol, model, mapped, accID, email string, status int, stream bool, start time.Time, errMsg string) {
+	if !s.loggingEnabled() {
+		return
+	}
+	_ = s.store.AddLog(models.RequestLog{
+		Protocol:     protocol,
+		Model:        model,
+		MappedModel:  mapped,
+		AccountID:    accID,
+		AccountEmail: email,
+		Status:       status,
+		Stream:       stream,
+		LatencyMS:    time.Since(start).Milliseconds(),
+		Error:        errMsg,
+	})
+}
+
+type flushWriter struct {
+	w io.Writer
+	f http.Flusher
+}
+
+func (f *flushWriter) Write(p []byte) (int, error) {
+	n, err := f.w.Write(p)
+	if f.f != nil {
+		f.f.Flush()
+	}
+	return n, err
+}
+
+var retryRe = regexp.MustCompile(`(?i)retry[- ]in["'=: ]+(\d+)`)
+
+func parseRetrySeconds(body string) int {
+	m := retryRe.FindStringSubmatch(body)
+	if len(m) == 2 {
+		n, _ := strconv.Atoi(m[1])
+		if n > 0 {
+			return n
+		}
+	}
+	return 60
+}
+
+func clipErr(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return "upstream error"
+	}
+	if json.Valid(b) {
+		var v map[string]any
+		if json.Unmarshal(b, &v) == nil {
+			if e := v["error"]; e != nil {
+				switch t := e.(type) {
+				case string:
+					s = t
+				case map[string]any:
+					if m, ok := t["message"].(string); ok {
+						s = m
+					}
+				}
+			}
+		}
+	}
+	if len(s) > 500 {
+		return s[:500]
+	}
+	return s
+}

@@ -1,0 +1,6 @@
+demo
+data
+server/data
+web/node_modules
+**/.git
+**/dist

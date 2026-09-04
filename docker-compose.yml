@@ -1,0 +1,14 @@
+services:
+  antigravity2api:
+    build: .
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-admin-token}
+      API_KEY: ${API_KEY:-sk-antigravity}
+      DATA_DIR: /app/data
+      BATCH_VALIDITY_DAYS: ${BATCH_VALIDITY_DAYS:-30}
+      SKIP_EXPIRED_ACCOUNTS: ${SKIP_EXPIRED_ACCOUNTS:-true}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
