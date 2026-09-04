@@ -68,7 +68,7 @@ export default function Monitor() {
   const to = Math.min(stats.total, page * pageSize);
 
   return (
-    <div>
+    <div className="log-page">
       <PageHeader
         kicker="运行"
         title="监控"
@@ -80,20 +80,22 @@ export default function Monitor() {
         }
       />
       {err ? <p className="err">{err}</p> : null}
-      <div className="log-kpis">
-        <div className="log-kpi">
+
+      <div className="log-stats">
+        <div className="log-stat">
           <span>总计</span>
           <strong>{stats.total}</strong>
         </div>
-        <div className="log-kpi is-ok">
+        <div className="log-stat is-ok">
           <span>正常</span>
           <strong>{stats.success}</strong>
         </div>
-        <div className="log-kpi is-bad">
+        <div className="log-stat is-bad">
           <span>错误</span>
           <strong>{stats.errors}</strong>
         </div>
       </div>
+
       {logging === false ? (
         <div className="panel" style={{ marginBottom: 16 }}>
           <h2>日志已关闭</h2>
@@ -101,88 +103,101 @@ export default function Monitor() {
           <Link to="/settings" className="btn btn-primary">去设置打开</Link>
         </div>
       ) : null}
-      <div className="data-wrap">
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>时间</th>
-              <th>协议</th>
-              <th>模型</th>
-              <th>账号</th>
-              <th>状态</th>
-              <th>耗时</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((l) => (
-              <tr key={l.id}>
-                <td>{fmtTime(l.created_at)}</td>
-                <td>{l.protocol}</td>
-                <td>
-                  <div style={{ fontWeight: 600 }}>{l.model || l.mapped_model || "—"}</div>
-                  {l.mixed ? (
-                    <div className="log-mix">
-                      <span className="badge badge-new">掺水</span>
-                      <span>实际 {l.mapped_model || "未知模型"}</span>
-                    </div>
-                  ) : (
-                    <div className="muted" style={{ fontSize: 12 }}>
-                      {l.mapped_model && l.mapped_model !== l.model ? l.mapped_model + " · " : ""}
-                      {l.stream ? "stream" : "json"}
-                    </div>
-                  )}
-                  {l.mixed ? <div className="muted" style={{ fontSize: 12 }}>{l.stream ? "stream" : "json"}</div> : null}
-                </td>
-                <td>{l.account_email || "—"}</td>
-                <td>
-                  <span className={`badge ${l.status >= 400 ? "badge-ink" : "badge-success"}`}>{l.status}</span>
-                  {l.error ? <div className="muted" style={{ fontSize: 12, marginTop: 6, maxWidth: 260 }}>{l.error}</div> : null}
-                </td>
-                <td className="mono">{l.latency_ms}ms</td>
+
+      <div className="log-panel">
+        <div className="log-table-wrap">
+          <table className="log-table">
+            <colgroup>
+              <col className="col-time" />
+              <col className="col-proto" />
+              <col className="col-model" />
+              <col className="col-account" />
+              <col className="col-status" />
+              <col className="col-latency" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>协议</th>
+                <th>模型</th>
+                <th>账号</th>
+                <th>状态</th>
+                <th>耗时</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-        {items.length === 0 && logging !== false ? <p className="muted" style={{ padding: 16 }}>暂无请求。</p> : null}
-      </div>
-      {logging !== false ? (
-        <div className="acct-pager">
-          <span>
-            {stats.total === 0 ? "共 0 条" : `第 ${page} / ${pages} 页 · ${from}-${to} 条 · 共 ${stats.total} 条`}
-          </span>
-          <div className="log-pager-tools">
-            <div className="dash-ranges">
-              {PAGE_SIZES.map((n) => (
-                <button
-                  key={n}
-                  type="button"
-                  className={pageSize === n ? "on" : ""}
-                  onClick={() => {
-                    setPageSize(n);
-                    setPage(1);
-                  }}
-                >
-                  {n}
-                </button>
+            </thead>
+            <tbody>
+              {items.map((l) => (
+                <tr key={l.id}>
+                  <td className="mono nowrap">{fmtTime(l.created_at)}</td>
+                  <td className="nowrap">{l.protocol}</td>
+                  <td>
+                    <div className="log-model-name">{l.model || l.mapped_model || "—"}</div>
+                    <div className="log-model-meta">
+                      {l.mixed ? <span className="log-mix-tag">掺水</span> : null}
+                      {l.mixed ? <span>实际 {l.mapped_model || "未知模型"}</span> : null}
+                      {!l.mixed && l.mapped_model && l.mapped_model !== l.model ? <span>{l.mapped_model}</span> : null}
+                      <span>{l.stream ? "stream" : "json"}</span>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="log-email" title={l.account_email || ""}>
+                      {l.account_email || "—"}
+                    </div>
+                  </td>
+                  <td>
+                    <div className="log-status">
+                      <span className={`badge ${l.status >= 400 ? "badge-ink" : "badge-success"}`}>{l.status}</span>
+                      {l.error ? <div className="log-error" title={l.error}>{l.error}</div> : null}
+                    </div>
+                  </td>
+                  <td className="mono nowrap log-latency">{l.latency_ms}ms</td>
+                </tr>
               ))}
-            </div>
-            <div className="row-actions">
-              <button className="btn btn-tertiary btn-sm" disabled={page <= 1} onClick={() => setPage(1)}>
-                «
-              </button>
-              <button className="btn btn-tertiary btn-sm" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>
-                ‹
-              </button>
-              <button className="btn btn-tertiary btn-sm" disabled={page >= pages} onClick={() => setPage((p) => Math.min(pages, p + 1))}>
-                ›
-              </button>
-              <button className="btn btn-tertiary btn-sm" disabled={page >= pages} onClick={() => setPage(pages)}>
-                »
-              </button>
+            </tbody>
+          </table>
+          {items.length === 0 && logging !== false ? <p className="log-empty">暂无请求。</p> : null}
+        </div>
+
+        {logging !== false ? (
+          <div className="log-foot">
+            <span className="log-foot-info">
+              {stats.total === 0 ? "共 0 条" : `第 ${page} / ${pages} 页 · ${from}-${to} 条 · 共 ${stats.total} 条`}
+            </span>
+            <div className="log-foot-controls">
+              <div className="log-pagesize" aria-label="每页条数">
+                {PAGE_SIZES.map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    className={pageSize === n ? "on" : ""}
+                    onClick={() => {
+                      setPageSize(n);
+                      setPage(1);
+                    }}
+                  >
+                    {n}
+                  </button>
+                ))}
+              </div>
+              <div className="log-pagebtns">
+                <button type="button" disabled={page <= 1} onClick={() => setPage(1)} aria-label="第一页">
+                  «
+                </button>
+                <button type="button" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))} aria-label="上一页">
+                  ‹
+                </button>
+                <span className="log-page-now">{page}/{pages}</span>
+                <button type="button" disabled={page >= pages} onClick={() => setPage((p) => Math.min(pages, p + 1))} aria-label="下一页">
+                  ›
+                </button>
+                <button type="button" disabled={page >= pages} onClick={() => setPage(pages)} aria-label="最后一页">
+                  »
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
     </div>
   );
 }
