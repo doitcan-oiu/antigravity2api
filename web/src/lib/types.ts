@@ -128,6 +128,7 @@ export type Settings = {
   batch_validity_days: number;
   proxy_enabled: boolean;
   proxy_url: string;
+  account_check_minutes: number;
 };
 
 export type MixRule = {

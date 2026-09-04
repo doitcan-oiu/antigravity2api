@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -153,6 +154,18 @@ func (s *Store) BoolSetting(key string, fallback bool) bool {
 	}
 	v := strings.ToLower(strings.TrimSpace(s.GetSetting(key, def)))
 	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func (s *Store) IntSetting(key string, fallback int) int {
+	v := strings.TrimSpace(s.GetSetting(key, ""))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
 }
 
 func (s *Store) SetSetting(key, value string) error {

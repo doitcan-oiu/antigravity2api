@@ -2,6 +2,7 @@ package pool
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -190,6 +191,62 @@ func (p *Pool) RefreshAccount(id string) (*models.Account, error) {
 }
 
 func (p *Pool) RefreshAll() (int, error) {
+	return p.refreshAccounts(false)
+}
+
+func (p *Pool) AccountCheckInterval() time.Duration {
+	mins := p.store.IntSetting("account_check_minutes", 30)
+	if mins <= 0 {
+		return 0
+	}
+	if mins < 5 {
+		mins = 5
+	}
+	if mins > 1440 {
+		mins = 1440
+	}
+	return time.Duration(mins) * time.Minute
+}
+
+func (p *Pool) StartHealthLoop() {
+	go p.healthLoop()
+}
+
+func (p *Pool) healthLoop() {
+	var busy sync.Mutex
+	first := true
+	for {
+		d := p.AccountCheckInterval()
+		if d <= 0 {
+			first = true
+			time.Sleep(15 * time.Second)
+			continue
+		}
+		wait := d
+		if first {
+			wait = 2 * time.Minute
+			if wait > d {
+				wait = d
+			}
+			first = false
+		}
+		time.Sleep(wait)
+		if !busy.TryLock() {
+			continue
+		}
+		go func() {
+			defer busy.Unlock()
+			n, err := p.refreshAccounts(true)
+			if err != nil {
+				log.Printf("account health check failed: %v", err)
+				return
+			}
+			log.Printf("account health check refreshed %d accounts", n)
+		}()
+	}
+}
+
+func (p *Pool) refreshAccounts(healthOnly bool) (int, error) {
 	accs, err := p.store.ListAccounts("")
 	if err != nil {
 		return 0, err
@@ -199,6 +256,15 @@ func (p *Pool) RefreshAll() (int, error) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	for i := range accs {
+		acc := accs[i]
+		if healthOnly {
+			if acc.Expired {
+				continue
+			}
+			if acc.Disabled && strings.Contains(acc.DisabledReason, "refresh_token") {
+				continue
+			}
+		}
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
@@ -209,7 +275,7 @@ func (p *Pool) RefreshAll() (int, error) {
 				n++
 				mu.Unlock()
 			}
-		}(accs[i].ID)
+		}(acc.ID)
 	}
 	wg.Wait()
 	return n, nil

@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import { api, setToken } from "../lib/api";
 import type { Settings } from "../lib/types";
+import { notifyError, notifySuccess } from "../lib/notify";
 import { PageHeader, Toggle } from "../components/StatusChip";
 
 export default function SettingsPage() {
   const [form, setForm] = useState<Settings | null>(null);
   const [err, setErr] = useState("");
-  const [msg, setMsg] = useState("");
   const [pending, setPending] = useState(false);
 
   useEffect(() => {
@@ -20,6 +20,7 @@ export default function SettingsPage() {
             skip_expired_accounts: Boolean(data.skip_expired_accounts),
             proxy_enabled: Boolean(data.proxy_enabled),
             proxy_url: data.proxy_url || "",
+            account_check_minutes: Number.isFinite(data.account_check_minutes) ? data.account_check_minutes : 30,
           });
         }
       })
@@ -35,7 +36,6 @@ export default function SettingsPage() {
     e.preventDefault();
     if (!form) return;
     setPending(true);
-    setMsg("");
     setErr("");
     try {
       const saved = await api<Settings>("/api/settings", {
@@ -44,9 +44,11 @@ export default function SettingsPage() {
       });
       setForm(saved);
       setToken(saved.admin_token);
-      setMsg("已保存");
+      notifySuccess("已保存");
     } catch (error) {
-      setErr(error instanceof Error ? error.message : "保存失败");
+      const message = error instanceof Error ? error.message : "保存失败";
+      setErr(message);
+      notifyError(message);
     } finally {
       setPending(false);
     }
@@ -150,8 +152,29 @@ export default function SettingsPage() {
           </p>
         </section>
 
-        {err ? <p className="err">{err}</p> : null}
-        {msg ? <p className="ok">{msg}</p> : null}
+        <section className="panel">
+          <h2>账号巡检</h2>
+          <div className="field">
+            <label htmlFor="check">检查间隔（分钟）</label>
+            <input
+              id="check"
+              type="number"
+              min={0}
+              max={1440}
+              value={String(form.account_check_minutes ?? 30)}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                setForm({
+                  ...form,
+                  account_check_minutes: Number.isFinite(n) ? Math.max(0, Math.min(1440, Math.round(n))) : 0,
+                });
+              }}
+            />
+          </div>
+          <p className="muted" style={{ fontSize: 14, margin: 0 }}>
+            定时刷新令牌、检查账号是否可用，并同步额度。填 0 关闭自动巡检，建议 15–60 分钟。
+          </p>
+        </section>
         <button className="btn btn-primary" disabled={pending} type="submit">
           {pending ? "保存中…" : "保存"}
         </button>

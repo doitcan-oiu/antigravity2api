@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import type { RequestLog, Settings } from "../lib/types";
+import { notifyError, notifySuccess } from "../lib/notify";
 import { PageHeader, fmtTime } from "../components/StatusChip";
 
 const PAGE_SIZES = [20, 50, 100];
@@ -50,8 +51,11 @@ export default function Monitor() {
       setItems([]);
       setStats({ total: 0, success: 0, errors: 0 });
       setPage(1);
+      notifySuccess("日志已清空");
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "清空失败");
+      const message = e instanceof Error ? e.message : "清空失败";
+      setErr(message);
+      notifyError(message);
     } finally {
       setClearing(false);
     }
@@ -136,7 +140,7 @@ export default function Monitor() {
                       {l.mixed ? <span className="log-mix-tag">掺水</span> : null}
                       {l.mixed ? <span>实际 {l.mapped_model || "未知模型"}</span> : null}
                       {!l.mixed && l.mapped_model && l.mapped_model !== l.model ? <span>{l.mapped_model}</span> : null}
-                      <span>{l.stream ? "stream" : "json"}</span>
+                      <span>{l.stream ? "流" : "非流"}</span>
                     </div>
                   </td>
                   <td>

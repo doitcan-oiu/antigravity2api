@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
+import { notifyError, notifySuccess } from "../lib/notify";
 import type { ImportResult, Settings } from "../lib/types";
 import { PageHeader, RemainChip } from "../components/StatusChip";
 
@@ -48,8 +49,11 @@ export default function ImportPage() {
       });
       setResult(res);
       setRaw("");
+      notifySuccess(`导入完成，成功 ${res.imported} 个`);
     } catch (error) {
-      setErr(error instanceof Error ? error.message : "导入失败");
+      const message = error instanceof Error ? error.message : "导入失败";
+      setErr(message);
+      notifyError(message);
     } finally {
       setPending(false);
     }

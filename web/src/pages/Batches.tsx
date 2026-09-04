@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { AlertTriangle, CalendarClock, CheckCircle2, Layers, Search } from "lucide-react";
 import { api } from "../lib/api";
+import { notifyError, notifySuccess } from "../lib/notify";
 import type { Batch } from "../lib/types";
 import { RemainBar, RemainChip, fmtDate, toneFor } from "../components/StatusChip";
 
@@ -29,8 +30,13 @@ export default function Batches() {
 
   async function remove(id: string) {
     if (!confirm("删除该批次及其全部账号？")) return;
-    await api(`/api/batches/${id}`, { method: "DELETE" });
-    load();
+    try {
+      await api(`/api/batches/${id}`, { method: "DELETE" });
+      await load();
+      notifySuccess("批次已删除");
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : "删除失败");
+    }
   }
 
   const counts = useMemo(() => {

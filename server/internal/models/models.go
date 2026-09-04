@@ -103,6 +103,7 @@ type Settings struct {
 	BatchValidityDays   int    `json:"batch_validity_days"`
 	ProxyEnabled        bool   `json:"proxy_enabled"`
 	ProxyURL            string `json:"proxy_url"`
+	AccountCheckMinutes int    `json:"account_check_minutes"`
 }
 
 type MixRule struct {

@@ -34,6 +34,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		BatchValidityDays:   atoi(s.store.GetSetting("batch_validity_days", strconv.Itoa(s.cfg.BatchValidityDays)), s.cfg.BatchValidityDays),
 		ProxyEnabled:        s.store.BoolSetting("proxy_enabled", false),
 		ProxyURL:            s.store.GetSetting("proxy_url", ""),
+		AccountCheckMinutes: s.store.IntSetting("account_check_minutes", 30),
 	})
 }
 
@@ -73,6 +74,14 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.store.SetSetting("proxy_enabled", proxyOn)
 	_ = s.store.SetSetting("proxy_url", proxyURL)
+	mins := body.AccountCheckMinutes
+	if mins < 0 {
+		mins = 0
+	}
+	if mins > 1440 {
+		mins = 1440
+	}
+	_ = s.store.SetSetting("account_check_minutes", strconv.Itoa(mins))
 	s.getSettings(w, r)
 }
 

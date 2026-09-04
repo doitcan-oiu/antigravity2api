@@ -1579,3 +1579,7 @@ button, input, textarea, select { font-family: inherit; }
   .panel { box-shadow: none !important; }
   .chip { border-radius: 9999px !important; }
 }
+
+[data-slot="toast-region"] {
+  z-index: 80 !important;
+}

@@ -37,12 +37,14 @@ func New(cfg config.Config, st *store.Store, webFS fs.FS) *Server {
 	}
 	oa := oauth.New(cfg, out)
 	cc := cloudcode.New(cfg, out)
+	p := pool.New(cfg, st, oa, cc)
+	p.StartHealthLoop()
 	return &Server{
 		cfg:   cfg,
 		store: st,
 		oauth: oa,
 		cc:    cc,
-		pool:  pool.New(cfg, st, oa, cc),
+		pool:  p,
 		out:   out,
 		web:   webFS,
 	}

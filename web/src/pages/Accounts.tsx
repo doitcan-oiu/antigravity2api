@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { AlertTriangle, Circle, Diamond, Gem, RefreshCw, Search, Trash2 } from "lucide-react";
 import { api } from "../lib/api";
+import { notifyError, notifySuccess } from "../lib/notify";
 import type { Account } from "../lib/types";
 import { RemainChip, StatusChip, fmtTime, initial, toneFor } from "../components/StatusChip";
 import { fmtReset, fmtResetRemain, quotaMeters, windowLabel } from "../lib/quota";
@@ -126,6 +127,11 @@ export default function Accounts() {
     try {
       await api(`/api/accounts/${id}${path}`, { method: "POST" });
       await load();
+      if (path === "/refresh") notifySuccess("已刷新额度");
+      else if (path === "/enable") notifySuccess("已启用");
+      else if (path === "/disable") notifySuccess("已停用");
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : "操作失败");
     } finally {
       setBusy("");
     }
@@ -137,6 +143,9 @@ export default function Accounts() {
     try {
       await api(`/api/accounts/${id}`, { method: "DELETE" });
       await load();
+      notifySuccess("账号已删除");
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : "删除失败");
     } finally {
       setBusy("");
     }
@@ -147,8 +156,11 @@ export default function Accounts() {
     try {
       await api("/api/accounts/refresh-all", { method: "POST" });
       await load();
+      notifySuccess("已同步全部额度");
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "刷新失败");
+      const message = e instanceof Error ? e.message : "刷新失败";
+      setErr(message);
+      notifyError(message);
     } finally {
       setBusy("");
     }
@@ -157,7 +169,7 @@ export default function Accounts() {
   async function cleanup() {
     const expired = items.filter((a) => a.expired);
     if (!expired.length) {
-      setErr("没有过期账号可清理");
+      notifyError("没有过期账号可清理");
       return;
     }
     if (!confirm(`删除 ${expired.length} 个过期账号？`)) return;
@@ -167,6 +179,9 @@ export default function Accounts() {
         await api(`/api/accounts/${a.id}`, { method: "DELETE" });
       }
       await load();
+      notifySuccess(`已清理 ${expired.length} 个过期账号`);
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : "清理失败");
     } finally {
       setBusy("");
     }

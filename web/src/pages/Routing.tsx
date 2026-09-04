@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import type { MixRule } from "../lib/types";
+import { notifyError, notifySuccess } from "../lib/notify";
 import { PageHeader, Toggle } from "../components/StatusChip";
 
 type CatalogItem = { id: string; display_name?: string; official?: boolean };
@@ -20,7 +21,6 @@ export default function Routing() {
   const [rules, setRules] = useState<MixRule[]>([]);
   const [models, setModels] = useState<string[]>([]);
   const [err, setErr] = useState("");
-  const [msg, setMsg] = useState("");
   const [pending, setPending] = useState(false);
 
   useEffect(() => {
@@ -51,16 +51,17 @@ export default function Routing() {
   async function save() {
     setPending(true);
     setErr("");
-    setMsg("");
     try {
       const saved = await api<{ items: MixRule[] }>("/api/model-routes", {
         method: "PUT",
         body: JSON.stringify({ items: rules }),
       });
       setRules(saved.items || []);
-      setMsg("已保存");
+      notifySuccess("已保存");
     } catch (error) {
-      setErr(error instanceof Error ? error.message : "保存失败");
+      const message = error instanceof Error ? error.message : "保存失败";
+      setErr(message);
+      notifyError(message);
     } finally {
       setPending(false);
     }
@@ -84,7 +85,6 @@ export default function Routing() {
         }
       />
       {err ? <p className="err">{err}</p> : null}
-      {msg ? <p className="ok">{msg}</p> : null}
 
       {rules.length === 0 ? (
         <section className="route-empty">
