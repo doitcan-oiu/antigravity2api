@@ -1,29 +1,67 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { ArrowDown, ArrowUp, Brain, Database, Search } from "lucide-react";
 import { api } from "../lib/api";
 import type { RequestLog, Settings } from "../lib/types";
 import { notifyError, notifySuccess } from "../lib/notify";
-import { PageHeader, fmtTime } from "../components/StatusChip";
+import { PageHeader } from "../components/StatusChip";
+import { LogList } from "../components/LogList";
+import { fmtCount } from "../lib/timing";
 
 const PAGE_SIZES = [20, 50, 100];
+const FILTERS = [
+  { id: "", label: "全部" },
+  { id: "openai", label: "OpenAI" },
+  { id: "claude", label: "Claude" },
+  { id: "gemini", label: "Gemini" },
+  { id: "errors", label: "错误" },
+] as const;
+
+type Stats = {
+  total: number;
+  success: number;
+  errors: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_tokens: number;
+  reasoning_tokens: number;
+};
+
+const emptyStats: Stats = {
+  total: 0,
+  success: 0,
+  errors: 0,
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_tokens: 0,
+  reasoning_tokens: 0,
+};
 
 export default function Monitor() {
   const [items, setItems] = useState<RequestLog[]>([]);
-  const [stats, setStats] = useState({ total: 0, success: 0, errors: 0 });
+  const [stats, setStats] = useState<Stats>(emptyStats);
   const [logging, setLogging] = useState<boolean | null>(null);
   const [err, setErr] = useState("");
   const [clearing, setClearing] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  const [query, setQuery] = useState("");
+  const [applied, setApplied] = useState("");
+  const [filter, setFilter] = useState("");
 
-  async function load(nextPage = page, nextSize = pageSize) {
+  async function load(nextPage = page, nextSize = pageSize, q = applied, nextFilter = filter) {
     try {
       const settings = await api<Settings>("/api/settings");
       setLogging(Boolean(settings.enable_logging));
       const offset = Math.max(0, (nextPage - 1) * nextSize);
-      const data = await api<{ items: RequestLog[]; total: number; success: number; errors: number }>(
-        `/api/logs?limit=${nextSize}&offset=${offset}`
-      );
+      const params = new URLSearchParams({
+        limit: String(nextSize),
+        offset: String(offset),
+      });
+      if (q.trim()) params.set("q", q.trim());
+      if (nextFilter === "errors") params.set("errors", "1");
+      else if (nextFilter) params.set("protocol", nextFilter);
+      const data = await api<Stats & { items: RequestLog[] }>(`/api/logs?${params.toString()}`);
       const total = data.total || 0;
       const pages = Math.max(1, Math.ceil(total / nextSize));
       if (total > 0 && offset >= total) {
@@ -35,6 +73,10 @@ export default function Monitor() {
         total,
         success: data.success || 0,
         errors: data.errors || 0,
+        input_tokens: data.input_tokens || 0,
+        output_tokens: data.output_tokens || 0,
+        cache_tokens: data.cache_tokens || 0,
+        reasoning_tokens: data.reasoning_tokens || 0,
       });
       setErr("");
     } catch (e) {
@@ -49,7 +91,7 @@ export default function Monitor() {
     try {
       await api("/api/logs", { method: "DELETE" });
       setItems([]);
-      setStats({ total: 0, success: 0, errors: 0 });
+      setStats(emptyStats);
       setPage(1);
       notifySuccess("日志已清空");
     } catch (e) {
@@ -62,14 +104,28 @@ export default function Monitor() {
   }
 
   useEffect(() => {
-    load(page, pageSize);
-    const t = setInterval(() => load(page, pageSize), 5000);
+    const t = setTimeout(() => {
+      setApplied(query);
+      setPage(1);
+    }, 280);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  useEffect(() => {
+    load(page, pageSize, applied, filter);
+    const t = setInterval(() => load(page, pageSize, applied, filter), 5000);
     return () => clearInterval(t);
-  }, [page, pageSize]);
+  }, [page, pageSize, applied, filter]);
 
   const pages = Math.max(1, Math.ceil(stats.total / pageSize));
   const from = stats.total === 0 ? 0 : (page - 1) * pageSize + 1;
   const to = Math.min(stats.total, page * pageSize);
+  const tokenCards = [
+    { label: "输入", value: stats.input_tokens, icon: ArrowUp },
+    { label: "输出", value: stats.output_tokens, icon: ArrowDown },
+    { label: "缓存", value: stats.cache_tokens, icon: Database },
+    { label: "推理", value: stats.reasoning_tokens, icon: Brain },
+  ];
 
   return (
     <div className="log-page">
@@ -85,18 +141,45 @@ export default function Monitor() {
       />
       {err ? <p className="err">{err}</p> : null}
 
-      <div className="log-stats">
-        <div className="log-stat">
-          <span>总计</span>
-          <strong>{stats.total}</strong>
+      <div className="log-token-stats">
+        {tokenCards.map((c) => (
+          <div className="log-token-stat" key={c.label}>
+            <div className="log-token-label">
+              <c.icon size={14} />
+              {c.label}
+            </div>
+            <strong>{fmtCount(c.value)}</strong>
+          </div>
+        ))}
+      </div>
+
+      <div className="log-toolbar">
+        <label className="acct-search">
+          <Search size={16} />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜索模型、账号或协议"
+          />
+        </label>
+        <div className="dash-ranges">
+          {FILTERS.map((f) => (
+            <button
+              key={f.id || "all"}
+              className={filter === f.id ? "on" : ""}
+              onClick={() => {
+                setFilter(f.id);
+                setPage(1);
+              }}
+            >
+              {f.label}
+            </button>
+          ))}
         </div>
-        <div className="log-stat is-ok">
-          <span>正常</span>
-          <strong>{stats.success}</strong>
-        </div>
-        <div className="log-stat is-bad">
-          <span>错误</span>
-          <strong>{stats.errors}</strong>
+        <div className="log-mini-stats">
+          <span>总计 {fmtCount(stats.total)}</span>
+          <span className="ok">正常 {fmtCount(stats.success)}</span>
+          <span className="bad">错误 {fmtCount(stats.errors)}</span>
         </div>
       </div>
 
@@ -109,59 +192,7 @@ export default function Monitor() {
       ) : null}
 
       <div className="log-panel">
-        <div className="log-table-wrap">
-          <table className="log-table">
-            <colgroup>
-              <col className="col-time" />
-              <col className="col-proto" />
-              <col className="col-model" />
-              <col className="col-account" />
-              <col className="col-status" />
-              <col className="col-latency" />
-            </colgroup>
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>协议</th>
-                <th>模型</th>
-                <th>账号</th>
-                <th>状态</th>
-                <th>耗时</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((l) => (
-                <tr key={l.id}>
-                  <td className="mono nowrap">{fmtTime(l.created_at)}</td>
-                  <td className="nowrap">{l.protocol}</td>
-                  <td>
-                    <div className="log-model-name">{l.model || l.mapped_model || "—"}</div>
-                    <div className="log-model-meta">
-                      {l.mixed ? <span className="log-mix-tag">掺水</span> : null}
-                      {l.mixed ? <span>实际 {l.mapped_model || "未知模型"}</span> : null}
-                      {!l.mixed && l.mapped_model && l.mapped_model !== l.model ? <span>{l.mapped_model}</span> : null}
-                      <span>{l.stream ? "流" : "非流"}</span>
-                    </div>
-                  </td>
-                  <td>
-                    <div className="log-email" title={l.account_email || ""}>
-                      {l.account_email || "—"}
-                    </div>
-                  </td>
-                  <td>
-                    <div className="log-status">
-                      <span className={`badge ${l.status >= 400 ? "badge-ink" : "badge-success"}`}>{l.status}</span>
-                      {l.error ? <div className="log-error" title={l.error}>{l.error}</div> : null}
-                    </div>
-                  </td>
-                  <td className="mono nowrap log-latency">{l.latency_ms}ms</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {items.length === 0 && logging !== false ? <p className="log-empty">暂无请求。</p> : null}
-        </div>
-
+        <LogList items={items} empty={logging === false ? "日志已关闭。" : "暂无请求。"} />
         {logging !== false ? (
           <div className="log-foot">
             <span className="log-foot-info">

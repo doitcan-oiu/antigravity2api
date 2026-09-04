@@ -246,7 +246,8 @@ func (s *Server) refreshAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"refreshed": n})
 }
 
-func (s *Server) listLogs(w http.ResponseWriter, r *http.Request) {
+func (s *Server) listAccountLogs(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	if limit <= 0 {
@@ -258,23 +259,63 @@ func (s *Server) listLogs(w http.ResponseWriter, r *http.Request) {
 	if offset < 0 {
 		offset = 0
 	}
-	list, err := s.store.ListLogs(limit, offset)
+	list, err := s.store.ListAccountLogs(id, limit, offset)
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
-	total, success, errors, err := s.store.LogStats()
+	total, success, errors, avg, err := s.store.AccountLogStats(id)
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"items":   list,
-		"total":   total,
-		"success": success,
-		"errors":  errors,
-		"limit":   limit,
-		"offset":  offset,
+		"items":          list,
+		"total":          total,
+		"success":        success,
+		"errors":         errors,
+		"avg_latency_ms": avg,
+		"limit":          limit,
+		"offset":         offset,
+	})
+}
+
+func (s *Server) listLogs(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	protocol := strings.TrimSpace(r.URL.Query().Get("protocol"))
+	onlyErr := r.URL.Query().Get("errors") == "1"
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	list, err := s.store.ListLogs(limit, offset, q, protocol, onlyErr)
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	ov, err := s.store.LogOverview(q, protocol, onlyErr)
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"items":            list,
+		"total":            ov.Total,
+		"success":          ov.Success,
+		"errors":           ov.Errors,
+		"input_tokens":     ov.InputTokens,
+		"output_tokens":    ov.OutputTokens,
+		"cache_tokens":     ov.CacheTokens,
+		"reasoning_tokens": ov.ReasoningTokens,
+		"limit":            limit,
+		"offset":           offset,
 	})
 }
 

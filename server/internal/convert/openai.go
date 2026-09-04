@@ -420,6 +420,9 @@ func GeminiToOpenAI(model string, raw []byte, streamID string) ([]byte, error) {
 }
 
 func collectParts(data map[string]any) (text, thinking string, toolCalls []any, finish string, usage any) {
+	if u := data["usageMetadata"]; u != nil {
+		usage = geminiUsageToOpenAI(u)
+	}
 	cands := AsSlice(data["candidates"])
 	if len(cands) == 0 {
 		return
@@ -463,10 +466,88 @@ func collectParts(data map[string]any) (text, thinking string, toolCalls []any, 
 			}
 		}
 	}
-	if u := data["usageMetadata"]; u != nil {
-		usage = geminiUsageToOpenAI(u)
-	}
 	return
+}
+
+type TokenUsage struct {
+	Input     int
+	Output    int
+	Cache     int
+	Reasoning int
+}
+
+func (u TokenUsage) Empty() bool {
+	return u.Input == 0 && u.Output == 0 && u.Cache == 0 && u.Reasoning == 0
+}
+
+func intVal(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	default:
+		return 0
+	}
+}
+
+func TokenUsageFromOpenAI(usage any) TokenUsage {
+	m := AsMap(usage)
+	if m == nil {
+		return TokenUsage{}
+	}
+	u := TokenUsage{
+		Input:  intVal(m["prompt_tokens"]),
+		Output: intVal(m["completion_tokens"]),
+	}
+	if d := AsMap(m["prompt_tokens_details"]); d != nil {
+		u.Cache = intVal(d["cached_tokens"])
+	}
+	if u.Cache == 0 {
+		u.Cache = intVal(m["cached_tokens"])
+	}
+	if d := AsMap(m["completion_tokens_details"]); d != nil {
+		u.Reasoning = intVal(d["reasoning_tokens"])
+	}
+	if u.Reasoning == 0 {
+		u.Reasoning = intVal(m["reasoning_tokens"])
+	}
+	return u
+}
+
+func completionTokens(usage any) int {
+	return TokenUsageFromOpenAI(usage).Output
+}
+
+func UsageFromGemini(raw []byte) TokenUsage {
+	if len(raw) == 0 {
+		return TokenUsage{}
+	}
+	var envelope map[string]any
+	if json.Unmarshal(raw, &envelope) != nil {
+		return TokenUsage{}
+	}
+	if u := usageFromPayload(envelope); !u.Empty() {
+		return u
+	}
+	if r := AsMap(envelope["response"]); r != nil {
+		return usageFromPayload(r)
+	}
+	return TokenUsage{}
+}
+
+func CompletionTokensFromGemini(raw []byte) int {
+	return UsageFromGemini(raw).Output
+}
+
+func usageFromPayload(data map[string]any) TokenUsage {
+	_, _, _, _, usage := collectParts(data)
+	return TokenUsageFromOpenAI(usage)
 }
 
 func geminiUsageToOpenAI(u any) map[string]any {
@@ -489,15 +570,28 @@ func geminiUsageToOpenAI(u any) map[string]any {
 		return 0
 	}
 	prompt := num("total_input_tokens", "promptTokenCount")
-	outTok := num("total_output_tokens", "candidatesTokenCount")
+	candidates := num("candidatesTokenCount")
+	outTok := candidates
+	if outTok == 0 {
+		outTok = num("total_output_tokens")
+	}
 	thought := num("total_thought_tokens", "thoughtsTokenCount")
 	tool := num("total_tool_use_tokens")
-	if m["total_output_tokens"] != nil {
+	if m["total_output_tokens"] != nil && candidates == 0 {
 		outTok = outTok + thought + tool
 	}
 	total := num("total_tokens", "totalTokenCount")
 	if total == 0 {
 		total = prompt + outTok
+	}
+	cache := num("cachedContentTokenCount", "cachedTokens", "cached_content_token_count")
+	if cache == 0 {
+		if d := AsMap(m["promptTokensDetails"]); d != nil {
+			cache = intVal(d["cachedContentTokenCount"])
+			if cache == 0 {
+				cache = intVal(d["cachedTokens"])
+			}
+		}
 	}
 	usage := map[string]any{
 		"prompt_tokens":     prompt,
@@ -506,6 +600,9 @@ func geminiUsageToOpenAI(u any) map[string]any {
 	}
 	if thought > 0 {
 		usage["completion_tokens_details"] = map[string]any{"reasoning_tokens": thought}
+	}
+	if cache > 0 {
+		usage["prompt_tokens_details"] = map[string]any{"cached_tokens": cache}
 	}
 	return usage
 }

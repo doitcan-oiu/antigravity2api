@@ -79,6 +79,7 @@ func (s *Server) Router() http.Handler {
 		r.Delete("/batches/{id}", s.deleteBatch)
 		r.Get("/accounts", s.listAccounts)
 		r.Get("/accounts/{id}", s.getAccount)
+		r.Get("/accounts/{id}/logs", s.listAccountLogs)
 		r.Post("/accounts/{id}/refresh", s.refreshAccount)
 		r.Post("/accounts/{id}/disable", s.disableAccount)
 		r.Post("/accounts/{id}/enable", s.enableAccount)

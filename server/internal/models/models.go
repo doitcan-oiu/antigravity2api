@@ -80,18 +80,34 @@ type QuotaBucket struct {
 }
 
 type RequestLog struct {
-	ID           int64  `json:"id"`
-	CreatedAt    int64  `json:"created_at"`
-	Protocol     string `json:"protocol"`
-	Model        string `json:"model"`
-	MappedModel  string `json:"mapped_model"`
-	AccountID    string `json:"account_id"`
-	AccountEmail string `json:"account_email"`
-	Status       int    `json:"status"`
-	Stream       bool   `json:"stream"`
-	LatencyMS    int64  `json:"latency_ms"`
-	Error        string `json:"error,omitempty"`
-	Mixed        bool   `json:"mixed"`
+	ID              int64   `json:"id"`
+	CreatedAt       int64   `json:"created_at"`
+	Protocol        string  `json:"protocol"`
+	Model           string  `json:"model"`
+	MappedModel     string  `json:"mapped_model"`
+	AccountID       string  `json:"account_id"`
+	AccountEmail    string  `json:"account_email"`
+	Status          int     `json:"status"`
+	Stream          bool    `json:"stream"`
+	LatencyMS       int64   `json:"latency_ms"`
+	Error           string  `json:"error,omitempty"`
+	Mixed           bool    `json:"mixed"`
+	TTFTMS          int64   `json:"ttft_ms"`
+	InputTokens     int     `json:"input_tokens"`
+	OutputTokens    int     `json:"output_tokens"`
+	CacheTokens     int     `json:"cache_tokens"`
+	ReasoningTokens int     `json:"reasoning_tokens"`
+	TPS             float64 `json:"tps"`
+}
+
+type LogOverview struct {
+	Total           int   `json:"total"`
+	Success         int   `json:"success"`
+	Errors          int   `json:"errors"`
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	CacheTokens     int64 `json:"cache_tokens"`
+	ReasoningTokens int64 `json:"reasoning_tokens"`
 }
 
 type Settings struct {

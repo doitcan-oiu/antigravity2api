@@ -158,3 +158,36 @@ export function windowLabel(window?: QuotaWindow) {
   if (window === "5h") return "滚动";
   return "";
 }
+
+export type QuotaWindowRow = {
+  label: string;
+  window: QuotaWindow;
+  percent: number;
+  reset?: string;
+};
+
+export type QuotaGroupView = {
+  name: string;
+  rows: QuotaWindowRow[];
+};
+
+export function quotaGroups(account: Account): QuotaGroupView[] {
+  return (["oss", "gemini-pro", "gemini-flash", "claude"] as QuotaKind[]).map((kind) => {
+    const group = findGroup(account.quota?.quota_groups, kind);
+    const weekly = pickBucket(group, "weekly");
+    const rolling = pickBucket(group, "5h");
+    const meter = meterFor(account, kind);
+    const rows: QuotaWindowRow[] = [];
+    if (weekly) {
+      rows.push({ label: "周限", window: "weekly", percent: pct(weekly.remaining_fraction), reset: weekly.reset_time });
+    }
+    if (rolling) {
+      rows.push({ label: "滚动", window: "5h", percent: pct(rolling.remaining_fraction), reset: rolling.reset_time });
+    } else if (meter.percent != null && meter.window === "5h") {
+      rows.push({ label: "滚动", window: "5h", percent: meter.percent, reset: meter.reset });
+    } else if (!weekly && meter.percent != null) {
+      rows.push({ label: meter.window === "weekly" ? "周限" : "滚动", window: meter.window || "5h", percent: meter.percent, reset: meter.reset });
+    }
+    return { name: LABELS[kind], rows };
+  }).filter((g) => g.rows.length > 0);
+}

@@ -4,7 +4,8 @@ import { AlertTriangle, Circle, Diamond, Gem, RefreshCw, Search, Trash2 } from "
 import { api } from "../lib/api";
 import { notifyError, notifySuccess } from "../lib/notify";
 import type { Account } from "../lib/types";
-import { RemainChip, StatusChip, fmtTime, initial, toneFor } from "../components/StatusChip";
+import AccountDetail from "../components/AccountDetail";
+import { RemainChip, StatusChip, fmtTime, initial } from "../components/StatusChip";
 import { fmtReset, fmtResetRemain, quotaMeters, windowLabel } from "../lib/quota";
 
 type Plan = "all" | "pro" | "ultra" | "free";
@@ -69,6 +70,7 @@ export default function Accounts() {
   const [onlyBad, setOnlyBad] = useState(false);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
+  const [selected, setSelected] = useState<Account | null>(null);
   const [params] = useSearchParams();
   const nav = useNavigate();
   const batch = params.get("batch") || "";
@@ -91,6 +93,13 @@ export default function Accounts() {
   useEffect(() => {
     setPage(1);
   }, [plan, query, batch, onlyBad]);
+
+  useEffect(() => {
+    if (!selected) return;
+    const next = items.find((a) => a.id === selected.id);
+    if (next) setSelected(next);
+    else setSelected(null);
+  }, [items]);
 
   const counts = useMemo(() => {
     const pro = items.filter((a) => planOf(a) === "pro");
@@ -271,7 +280,8 @@ export default function Accounts() {
           {pageItems.map((a) => (
             <article
               key={a.id}
-              className={`account-card tone-${toneFor(a.email, a.expired)} ${a.disabled ? "is-disabled" : ""}`}
+              className={`account-card ${a.disabled ? "is-disabled" : ""}`}
+              onClick={() => setSelected(a)}
             >
               <div className="account-card-head">
                 <div className="account-avatar">{initial(a.email)}</div>
@@ -292,7 +302,7 @@ export default function Accounts() {
               </div>
               <div className="account-expire">{fmtTime(a.expires_at)} 到期</div>
               <QuotaCell account={a} />
-              <div className="row-actions">
+              <div className="row-actions" onClick={(e) => e.stopPropagation()}>
                 <button className="btn btn-tertiary btn-sm" disabled={busy.startsWith(a.id)} onClick={() => act(a.id, "/refresh")}>
                   {busy === `${a.id}/refresh` ? "刷新中" : "刷新"}
                 </button>
@@ -335,6 +345,7 @@ export default function Accounts() {
           </div>
         </div>
       ) : null}
+      {selected ? <AccountDetail account={selected} onClose={() => setSelected(null)} /> : null}
     </div>
   );
 }

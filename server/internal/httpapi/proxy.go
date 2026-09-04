@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"math/rand"
 	"net/http"
 	"strconv"
@@ -99,14 +100,12 @@ func (s *Server) geminiGenerate(w http.ResponseWriter, r *http.Request) {
 			return nil, err
 		}
 		return convert.StampGeminiModel(out, report), nil
-	}, func(dst io.Writer, report string, src io.Reader) error {
-		return convert.WriteGeminiSSE(dst, report, src)
-	})
+	}, convert.WriteGeminiSSE)
 }
 
 type buildFn func(projectID, email, accountID string) (payload any, mapped string, stream bool, err error)
 type toJSONFn func(mapped string, raw []byte) ([]byte, error)
-type toSSEFn func(dst io.Writer, model string, src io.Reader) error
+type toSSEFn func(dst io.Writer, model string, src io.Reader) (convert.StreamStats, error)
 
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request, protocol, model string, mixed, streamHint bool, build buildFn, toJSON toJSONFn, toSSE toSSEFn) {
 	start := time.Now()
@@ -194,7 +193,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, protocol, model s
 				lastStatus = resp.StatusCode
 				lastErr = clipErr(body)
 				writeJSON(w, resp.StatusCode, map[string]any{"error": lastErr})
-				s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, resp.StatusCode, true, start, lastErr)
+				s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, resp.StatusCode, true, start, lastErr, convert.StreamStats{})
 				return
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -203,30 +202,31 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, protocol, model s
 			w.WriteHeader(200)
 			flusher, _ := w.(http.Flusher)
 			pw := &flushWriter{w: w, f: flusher}
-			if err := toSSE(pw, model, resp.Body); err != nil {
+			stats, err := toSSE(pw, model, resp.Body)
+			if err != nil {
 				lastErr = err.Error()
 			}
 			resp.Body.Close()
-			s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, 200, true, start, lastErr)
+			s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, 200, true, start, lastErr, stats)
 			return
 		}
 		if resp.StatusCode >= 400 {
 			lastStatus = resp.StatusCode
 			lastErr = clipErr(data)
 			writeJSON(w, resp.StatusCode, map[string]any{"error": lastErr})
-			s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, resp.StatusCode, false, start, lastErr)
+			s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, resp.StatusCode, false, start, lastErr, convert.StreamStats{})
 			return
 		}
 		out, err := toJSON(model, data)
 		if err != nil {
 			writeJSON(w, 502, map[string]any{"error": err.Error()})
-			s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, 502, false, start, err.Error())
+			s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, 502, false, start, err.Error(), convert.StreamStats{})
 			return
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(200)
 		_, _ = w.Write(out)
-		s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, 200, false, start, "")
+		s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, 200, false, start, "", convert.StreamStats{Usage: convert.UsageFromGemini(data)})
 		return
 	}
 
@@ -237,28 +237,58 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, protocol, model s
 		lastErr = "no available accounts"
 	}
 	writeJSON(w, lastStatus, map[string]any{"error": lastErr})
-	s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, lastStatus, stream, start, lastErr)
+	s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, lastStatus, stream, start, lastErr, convert.StreamStats{})
 }
 
 func (s *Server) loggingEnabled() bool {
 	return s.store.BoolSetting("enable_logging", true)
 }
 
-func (s *Server) logReq(protocol, model, mapped string, mixed bool, accID, email string, status int, stream bool, start time.Time, errMsg string) {
+func (s *Server) logReq(protocol, model, mapped string, mixed bool, accID, email string, status int, stream bool, start time.Time, errMsg string, stats convert.StreamStats) {
 	if !s.loggingEnabled() {
 		return
 	}
+	latency := time.Since(start).Milliseconds()
+	var ttft int64
+	if !stats.FirstTokenAt.IsZero() {
+		ttft = stats.FirstTokenAt.Sub(start).Milliseconds()
+		if ttft < 1 {
+			ttft = 1
+		}
+		if ttft > latency {
+			ttft = latency
+		}
+	} else if !stream && status < 400 && latency > 0 {
+		ttft = latency
+	}
+	outTok := stats.Usage.Output
+	var tps float64
+	if outTok > 0 {
+		gen := latency
+		if stream && ttft > 0 && latency > ttft {
+			gen = latency - ttft
+		}
+		if gen > 0 {
+			tps = math.Round((float64(outTok)/(float64(gen)/1000.0))*100) / 100
+		}
+	}
 	_ = s.store.AddLog(models.RequestLog{
-		Protocol:     protocol,
-		Model:        model,
-		MappedModel:  mapped,
-		AccountID:    accID,
-		AccountEmail: email,
-		Status:       status,
-		Stream:       stream,
-		LatencyMS:    time.Since(start).Milliseconds(),
-		Error:        errMsg,
-		Mixed:        mixed,
+		Protocol:        protocol,
+		Model:           model,
+		MappedModel:     mapped,
+		AccountID:       accID,
+		AccountEmail:    email,
+		Status:          status,
+		Stream:          stream,
+		LatencyMS:       latency,
+		Error:           errMsg,
+		Mixed:           mixed,
+		TTFTMS:          ttft,
+		InputTokens:     stats.Usage.Input,
+		OutputTokens:    outTok,
+		CacheTokens:     stats.Usage.Cache,
+		ReasoningTokens: stats.Usage.Reasoning,
+		TPS:             tps,
 	})
 }
 

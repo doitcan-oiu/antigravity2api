@@ -91,7 +91,13 @@ CREATE TABLE IF NOT EXISTS request_logs (
   stream INTEGER,
   latency_ms INTEGER,
   error TEXT,
-  mixed INTEGER NOT NULL DEFAULT 0
+  mixed INTEGER NOT NULL DEFAULT 0,
+  ttft_ms INTEGER NOT NULL DEFAULT 0,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_tokens INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+  tps REAL NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
@@ -107,6 +113,12 @@ CREATE INDEX IF NOT EXISTS idx_accounts_pick ON accounts(disabled, last_used);
 	_, _ = s.db.Exec(`ALTER TABLE batches ADD COLUMN purchased_at INTEGER`)
 	_, _ = s.db.Exec(`UPDATE batches SET purchased_at = created_at WHERE purchased_at IS NULL OR purchased_at = 0`)
 	_, _ = s.db.Exec(`ALTER TABLE request_logs ADD COLUMN mixed INTEGER NOT NULL DEFAULT 0`)
+	_, _ = s.db.Exec(`ALTER TABLE request_logs ADD COLUMN ttft_ms INTEGER NOT NULL DEFAULT 0`)
+	_, _ = s.db.Exec(`ALTER TABLE request_logs ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = s.db.Exec(`ALTER TABLE request_logs ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = s.db.Exec(`ALTER TABLE request_logs ADD COLUMN cache_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = s.db.Exec(`ALTER TABLE request_logs ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = s.db.Exec(`ALTER TABLE request_logs ADD COLUMN tps REAL NOT NULL DEFAULT 0`)
 	return nil
 }
 
@@ -437,9 +449,9 @@ func (s *Store) AddLog(l models.RequestLog) error {
 func (s *Store) logWorker() {
 	for l := range s.logCh {
 		_, _ = s.db.Exec(`
-INSERT INTO request_logs(created_at, protocol, model, mapped_model, account_id, account_email, status, stream, latency_ms, error, mixed)
-VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-			l.CreatedAt, l.Protocol, l.Model, l.MappedModel, l.AccountID, l.AccountEmail, l.Status, boolToInt(l.Stream), l.LatencyMS, l.Error, boolToInt(l.Mixed))
+INSERT INTO request_logs(created_at, protocol, model, mapped_model, account_id, account_email, status, stream, latency_ms, error, mixed, ttft_ms, input_tokens, output_tokens, cache_tokens, reasoning_tokens, tps)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			l.CreatedAt, l.Protocol, l.Model, l.MappedModel, l.AccountID, l.AccountEmail, l.Status, boolToInt(l.Stream), l.LatencyMS, l.Error, boolToInt(l.Mixed), l.TTFTMS, l.InputTokens, l.OutputTokens, l.CacheTokens, l.ReasoningTokens, l.TPS)
 	}
 }
 
@@ -455,26 +467,75 @@ func (s *Store) ClearLogs() error {
 	return err
 }
 
+const logSelect = `SELECT id, created_at, protocol, model, mapped_model, account_id, account_email, status, stream, latency_ms, error, COALESCE(mixed, 0), COALESCE(ttft_ms, 0), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(cache_tokens, 0), COALESCE(reasoning_tokens, 0), COALESCE(tps, 0) FROM request_logs`
+
+func logWhere(q, protocol string, onlyErr bool) (string, []any) {
+	var where []string
+	var args []any
+	if q = strings.TrimSpace(q); q != "" {
+		like := "%" + q + "%"
+		where = append(where, "(IFNULL(model,'') LIKE ? OR IFNULL(mapped_model,'') LIKE ? OR IFNULL(account_email,'') LIKE ? OR IFNULL(protocol,'') LIKE ?)")
+		args = append(args, like, like, like, like)
+	}
+	if protocol = strings.TrimSpace(protocol); protocol != "" {
+		where = append(where, "protocol = ?")
+		args = append(args, protocol)
+	}
+	if onlyErr {
+		where = append(where, "status >= 400")
+	}
+	if len(where) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(where, " AND "), args
+}
+
 func (s *Store) LogStats() (total, success, errors int, err error) {
-	var ok, bad sql.NullInt64
-	err = s.db.QueryRow(`
-SELECT COUNT(*),
-       SUM(CASE WHEN status < 400 THEN 1 ELSE 0 END),
-       SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END)
-FROM request_logs`).Scan(&total, &ok, &bad)
+	ov, err := s.LogOverview("", "", false)
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	if ok.Valid {
-		success = int(ok.Int64)
-	}
-	if bad.Valid {
-		errors = int(bad.Int64)
-	}
-	return total, success, errors, nil
+	return ov.Total, ov.Success, ov.Errors, nil
 }
 
-func (s *Store) ListLogs(limit, offset int) ([]models.RequestLog, error) {
+func (s *Store) LogOverview(q, protocol string, onlyErr bool) (models.LogOverview, error) {
+	var ov models.LogOverview
+	where, args := logWhere(q, protocol, onlyErr)
+	var ok, bad, in, out, cache, think sql.NullInt64
+	err := s.db.QueryRow(`
+SELECT COUNT(*),
+       SUM(CASE WHEN status < 400 THEN 1 ELSE 0 END),
+       SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
+       SUM(COALESCE(input_tokens, 0)),
+       SUM(COALESCE(output_tokens, 0)),
+       SUM(COALESCE(cache_tokens, 0)),
+       SUM(COALESCE(reasoning_tokens, 0))
+FROM request_logs`+where, args...).Scan(&ov.Total, &ok, &bad, &in, &out, &cache, &think)
+	if err != nil {
+		return ov, err
+	}
+	if ok.Valid {
+		ov.Success = int(ok.Int64)
+	}
+	if bad.Valid {
+		ov.Errors = int(bad.Int64)
+	}
+	if in.Valid {
+		ov.InputTokens = in.Int64
+	}
+	if out.Valid {
+		ov.OutputTokens = out.Int64
+	}
+	if cache.Valid {
+		ov.CacheTokens = cache.Int64
+	}
+	if think.Valid {
+		ov.ReasoningTokens = think.Int64
+	}
+	return ov, nil
+}
+
+func (s *Store) ListLogs(limit, offset int, q, protocol string, onlyErr bool) ([]models.RequestLog, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -484,18 +545,40 @@ func (s *Store) ListLogs(limit, offset int) ([]models.RequestLog, error) {
 	if offset < 0 {
 		offset = 0
 	}
-	rows, err := s.db.Query(`
-SELECT id, created_at, protocol, model, mapped_model, account_id, account_email, status, stream, latency_ms, error, COALESCE(mixed, 0)
-FROM request_logs ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
+	where, args := logWhere(q, protocol, onlyErr)
+	args = append(args, limit, offset)
+	rows, err := s.db.Query(logSelect+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanLogs(rows)
+}
+
+func (s *Store) ListAccountLogs(accountID string, limit, offset int) ([]models.RequestLog, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.Query(logSelect+` WHERE account_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`, accountID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanLogs(rows)
+}
+
+func scanLogs(rows *sql.Rows) ([]models.RequestLog, error) {
 	out := make([]models.RequestLog, 0)
 	for rows.Next() {
 		var l models.RequestLog
 		var stream, mixed int
-		if err := rows.Scan(&l.ID, &l.CreatedAt, &l.Protocol, &l.Model, &l.MappedModel, &l.AccountID, &l.AccountEmail, &l.Status, &stream, &l.LatencyMS, &l.Error, &mixed); err != nil {
+		if err := rows.Scan(&l.ID, &l.CreatedAt, &l.Protocol, &l.Model, &l.MappedModel, &l.AccountID, &l.AccountEmail, &l.Status, &stream, &l.LatencyMS, &l.Error, &mixed, &l.TTFTMS, &l.InputTokens, &l.OutputTokens, &l.CacheTokens, &l.ReasoningTokens, &l.TPS); err != nil {
 			return nil, err
 		}
 		l.Stream = stream == 1
@@ -503,6 +586,30 @@ FROM request_logs ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
 		out = append(out, l)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) AccountLogStats(accountID string) (total, success, errors int, avgLatency int64, err error) {
+	var ok, bad sql.NullInt64
+	var avg sql.NullFloat64
+	err = s.db.QueryRow(`
+SELECT COUNT(*),
+       SUM(CASE WHEN status < 400 THEN 1 ELSE 0 END),
+       SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
+       AVG(latency_ms)
+FROM request_logs WHERE account_id = ?`, accountID).Scan(&total, &ok, &bad, &avg)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	if ok.Valid {
+		success = int(ok.Int64)
+	}
+	if bad.Valid {
+		errors = int(bad.Int64)
+	}
+	if avg.Valid {
+		avgLatency = int64(avg.Float64)
+	}
+	return total, success, errors, avgLatency, nil
 }
 
 func (s *Store) Dashboard() (*models.Dashboard, error) {

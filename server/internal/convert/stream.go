@@ -7,11 +7,30 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
 
-func WriteOpenAISSE(dst io.Writer, model string, src io.Reader) error {
+type StreamStats struct {
+	FirstTokenAt time.Time
+	Usage        TokenUsage
+}
+
+func (s *StreamStats) note(text, thinking string, toolCalls []any, usage any) {
+	if s == nil {
+		return
+	}
+	if s.FirstTokenAt.IsZero() && (text != "" || thinking != "" || len(toolCalls) > 0) {
+		s.FirstTokenAt = time.Now()
+	}
+	if u := TokenUsageFromOpenAI(usage); !u.Empty() {
+		s.Usage = u
+	}
+}
+
+func WriteOpenAISSE(dst io.Writer, model string, src io.Reader) (StreamStats, error) {
+	var stats StreamStats
 	id := "chatcmpl-" + uuid.NewString()
 	reader := bufio.NewReader(src)
 	var buf bytes.Buffer
@@ -20,7 +39,7 @@ func WriteOpenAISSE(dst io.Writer, model string, src io.Reader) error {
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && err != io.EOF {
-			return err
+			return stats, err
 		}
 		buf.WriteString(line)
 		for {
@@ -36,6 +55,7 @@ func WriteOpenAISSE(dst io.Writer, model string, src io.Reader) error {
 				continue
 			}
 			text, thinking, toolCalls, finish, usage := collectParts(payload)
+			stats.note(text, thinking, toolCalls, usage)
 			if !sentRole {
 				_ = writeSSE(dst, map[string]any{
 					"id": id, "object": "chat.completion.chunk", "created": nowUnix(), "model": model,
@@ -91,10 +111,11 @@ func WriteOpenAISSE(dst io.Writer, model string, src io.Reader) error {
 		}
 	}
 	_, _ = io.WriteString(dst, "data: [DONE]\n\n")
-	return nil
+	return stats, nil
 }
 
-func WriteClaudeSSE(dst io.Writer, model string, src io.Reader) error {
+func WriteClaudeSSE(dst io.Writer, model string, src io.Reader) (StreamStats, error) {
+	var stats StreamStats
 	msgID := "msg_" + uuid.NewString()
 	reader := bufio.NewReader(src)
 	var buf bytes.Buffer
@@ -109,7 +130,7 @@ func WriteClaudeSSE(dst io.Writer, model string, src io.Reader) error {
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && err != io.EOF {
-			return err
+			return stats, err
 		}
 		buf.WriteString(line)
 		for {
@@ -135,6 +156,7 @@ func WriteClaudeSSE(dst io.Writer, model string, src io.Reader) error {
 				started = true
 			}
 			text, thinking, toolCalls, finish, usage := collectParts(payload)
+			stats.note(text, thinking, toolCalls, usage)
 			if thinking != "" {
 				if !thinkOpen {
 					writeEvent("content_block_start", map[string]any{
@@ -237,16 +259,17 @@ func WriteClaudeSSE(dst io.Writer, model string, src io.Reader) error {
 		writeEvent("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn"}})
 		writeEvent("message_stop", map[string]any{"type": "message_stop"})
 	}
-	return nil
+	return stats, nil
 }
 
-func WriteGeminiSSE(dst io.Writer, model string, src io.Reader) error {
+func WriteGeminiSSE(dst io.Writer, model string, src io.Reader) (StreamStats, error) {
+	var stats StreamStats
 	reader := bufio.NewReader(src)
 	var buf bytes.Buffer
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && err != io.EOF {
-			return err
+			return stats, err
 		}
 		buf.WriteString(line)
 		for {
@@ -261,6 +284,8 @@ func WriteGeminiSSE(dst io.Writer, model string, src io.Reader) error {
 			if !ok {
 				continue
 			}
+			text, thinking, toolCalls, _, usage := collectParts(payload)
+			stats.note(text, thinking, toolCalls, usage)
 			stampGeminiModel(payload, model)
 			b, _ := json.Marshal(payload)
 			fmt.Fprintf(dst, "data: %s\n\n", b)
@@ -269,7 +294,7 @@ func WriteGeminiSSE(dst io.Writer, model string, src io.Reader) error {
 			break
 		}
 	}
-	return nil
+	return stats, nil
 }
 
 func takeSSE(buf *bytes.Buffer) (string, []byte, bool) {

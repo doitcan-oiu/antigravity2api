@@ -117,6 +117,12 @@ export type RequestLog = {
   latency_ms: number;
   error?: string;
   mixed?: boolean;
+  ttft_ms?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_tokens?: number;
+  reasoning_tokens?: number;
+  tps?: number;
 };
 
 export type Settings = {
