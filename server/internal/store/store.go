@@ -461,13 +461,19 @@ FROM request_logs`).Scan(&total, &ok, &bad)
 	return total, success, errors, nil
 }
 
-func (s *Store) ListLogs(limit int) ([]models.RequestLog, error) {
+func (s *Store) ListLogs(limit, offset int) ([]models.RequestLog, error) {
 	if limit <= 0 {
-		limit = 100
+		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	rows, err := s.db.Query(`
 SELECT id, created_at, protocol, model, mapped_model, account_id, account_email, status, stream, latency_ms, error, COALESCE(mixed, 0)
-FROM request_logs ORDER BY id DESC LIMIT ?`, limit)
+FROM request_logs ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}

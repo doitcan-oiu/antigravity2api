@@ -1,12 +1,14 @@
 import type { Account, QuotaGroup } from "./types";
 
 export type QuotaKind = "oss" | "gemini-pro" | "gemini-flash" | "claude";
+export type QuotaWindow = "weekly" | "5h";
 
 export type QuotaMeter = {
   kind: QuotaKind;
   label: string;
   percent: number | null;
   reset?: string;
+  window?: QuotaWindow;
 };
 
 const LABELS: Record<QuotaKind, string> = {
@@ -41,61 +43,93 @@ const PREFERRED: Record<QuotaKind, string[]> = {
   claude: ["claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-sonnet-4-5"],
 };
 
-function groupKeys(kind: QuotaKind) {
-  switch (kind) {
-    case "oss":
-      return ["gpt-oss", "oss"];
-    case "gemini-pro":
-      return ["gemini pro", "gemini-pro"];
-    case "gemini-flash":
-      return ["flash"];
-    case "claude":
-      return ["claude"];
-  }
-}
-
-function fromGroups(groups: QuotaGroup[] | undefined, kind: QuotaKind): { percent: number; reset?: string } | null {
+function findGroup(groups: QuotaGroup[] | undefined, kind: QuotaKind): QuotaGroup | null {
   if (!groups?.length) return null;
-  const keys = groupKeys(kind);
   for (const g of groups) {
     const name = norm(g.display_name || "");
-    if (!keys.some((k) => name.includes(k))) continue;
-    if (kind === "oss" && (name.includes("claude") || name.includes("gemini"))) continue;
-    if (kind === "claude" && (name.includes("oss") || name.includes("gemini"))) continue;
-    if (kind === "gemini-pro" && (name.includes("flash") || name.includes("claude"))) continue;
-    if (kind === "gemini-flash" && name.includes("pro") && !name.includes("flash")) continue;
-    const bucket = g.buckets?.[0];
-    if (!bucket) continue;
-    return {
-      percent: Math.round((bucket.remaining_fraction || 0) * 100),
-      reset: bucket.reset_time,
-    };
+    if (kind === "oss" || kind === "claude") {
+      if (name.includes("gemini")) continue;
+      if (name.includes("claude") || name.includes("gpt") || name.includes("oss") || name.includes("3p")) return g;
+      continue;
+    }
+    if (name.includes("claude") || name.includes("gpt")) continue;
+    if (name.includes("gemini")) return g;
   }
   return null;
 }
 
-export function quotaMeters(account: Account): QuotaMeter[] {
+function bucketKey(bucket: QuotaGroup["buckets"][number]) {
+  return `${bucket.window || ""} ${bucket.bucket_id || ""} ${bucket.display_name || ""}`.toLowerCase();
+}
+
+function pickBucket(group: QuotaGroup | null, window: QuotaWindow) {
+  if (!group?.buckets?.length) return null;
+  for (const bucket of group.buckets) {
+    const key = bucketKey(bucket);
+    if (window === "weekly" && key.includes("week")) return bucket;
+    if (window === "5h" && (key.includes("5h") || key.includes("hour") || key.includes("5-hour") || key.includes("five hour"))) {
+      return bucket;
+    }
+  }
+  return null;
+}
+
+function pct(fraction: number | undefined | null) {
+  return Math.round((fraction || 0) * 100);
+}
+
+function meterFor(account: Account, kind: QuotaKind): QuotaMeter {
   const models = account.quota?.models || [];
-  const kinds: QuotaKind[] = ["oss", "gemini-pro", "gemini-flash", "claude"];
-  return kinds.map((kind) => {
-    let found = PREFERRED[kind].map((id) => models.find((m) => norm(m.name) === id)).find(Boolean);
-    if (!found) found = models.find((m) => kindOf(m.name, m.display_name) === kind);
-    if (found) {
+  let found = PREFERRED[kind].map((id) => models.find((m) => norm(m.name) === id)).find(Boolean);
+  if (!found) found = models.find((m) => kindOf(m.name, m.display_name) === kind);
+
+  const group = findGroup(account.quota?.quota_groups, kind);
+  const weekly = pickBucket(group, "weekly");
+  const rolling = pickBucket(group, "5h");
+  const modelPercent = found ? found.percentage : null;
+  const rollingPercent = rolling ? pct(rolling.remaining_fraction) : null;
+  const fiveHourPercent = modelPercent ?? rollingPercent;
+  const fiveHourReset = rolling?.reset_time || found?.reset_time;
+
+  if (weekly) {
+    if (weekly.remaining_fraction <= 0) {
       return {
         kind,
         label: LABELS[kind],
-        percent: found.percentage,
-        reset: found.reset_time,
+        percent: pct(weekly.remaining_fraction),
+        reset: weekly.reset_time,
+        window: "weekly",
       };
     }
-    const group = fromGroups(account.quota?.quota_groups, kind);
+    if (fiveHourPercent != null) {
+      return {
+        kind,
+        label: LABELS[kind],
+        percent: fiveHourPercent,
+        reset: fiveHourReset,
+        window: "5h",
+      };
+    }
     return {
       kind,
       label: LABELS[kind],
-      percent: group?.percent ?? null,
-      reset: group?.reset,
+      percent: pct(weekly.remaining_fraction),
+      reset: weekly.reset_time,
+      window: "weekly",
     };
-  });
+  }
+
+  return {
+    kind,
+    label: LABELS[kind],
+    percent: fiveHourPercent,
+    reset: fiveHourReset,
+    window: fiveHourPercent == null ? undefined : "5h",
+  };
+}
+
+export function quotaMeters(account: Account): QuotaMeter[] {
+  return (["oss", "gemini-pro", "gemini-flash", "claude"] as QuotaKind[]).map((kind) => meterFor(account, kind));
 }
 
 export function fmtReset(reset?: string) {
@@ -103,4 +137,24 @@ export function fmtReset(reset?: string) {
   const t = Date.parse(reset);
   if (Number.isNaN(t)) return reset;
   return new Date(t).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+export function fmtResetRemain(reset?: string) {
+  if (!reset) return "";
+  const t = Date.parse(reset);
+  if (Number.isNaN(t)) return "";
+  const diff = t - Date.now();
+  if (diff <= 0) return "已刷新";
+  const mins = Math.max(1, Math.floor(diff / 60000));
+  const hours = Math.floor(mins / 60);
+  const days = Math.floor(hours / 24);
+  if (days >= 1) return `${days}天${hours % 24}小时`;
+  if (hours >= 1) return `${hours}小时${mins % 60}分`;
+  return `${mins}分钟`;
+}
+
+export function windowLabel(window?: QuotaWindow) {
+  if (window === "weekly") return "周限";
+  if (window === "5h") return "滚动";
+  return "";
 }

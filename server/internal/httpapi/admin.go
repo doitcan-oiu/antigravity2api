@@ -239,7 +239,17 @@ func (s *Server) refreshAll(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listLogs(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	list, err := s.store.ListLogs(limit)
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	list, err := s.store.ListLogs(limit, offset)
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
@@ -254,6 +264,8 @@ func (s *Server) listLogs(w http.ResponseWriter, r *http.Request) {
 		"total":   total,
 		"success": success,
 		"errors":  errors,
+		"limit":   limit,
+		"offset":  offset,
 	})
 }
 

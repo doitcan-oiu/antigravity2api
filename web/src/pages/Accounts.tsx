@@ -4,7 +4,7 @@ import { AlertTriangle, Circle, Diamond, Gem, RefreshCw, Search, Trash2 } from "
 import { api } from "../lib/api";
 import type { Account } from "../lib/types";
 import { RemainChip, StatusChip, fmtTime, initial, toneFor } from "../components/StatusChip";
-import { fmtReset, quotaMeters } from "../lib/quota";
+import { fmtReset, fmtResetRemain, quotaMeters, windowLabel } from "../lib/quota";
 
 type Plan = "all" | "pro" | "ultra" | "free";
 
@@ -34,11 +34,14 @@ function QuotaCell({ account }: { account: Account }) {
       {meters.map((m) => {
         const empty = m.percent == null;
         const low = (m.percent ?? 0) <= 20;
+        const remain = fmtResetRemain(m.reset);
+        const win = windowLabel(m.window);
+        const resetText = [win, remain].filter(Boolean).join(" · ");
         return (
           <div
             key={m.kind}
             className={`quota-meter kind-${m.kind} ${empty ? "empty" : ""} ${low && !empty ? "low" : ""}`}
-            title={m.reset ? `重置 ${fmtReset(m.reset)}` : m.label}
+            title={m.reset ? `${m.label} · ${win || "额度"} · ${fmtReset(m.reset)} 刷新` : m.label}
           >
             <div className="top">
               <span>{m.label}</span>
@@ -47,6 +50,7 @@ function QuotaCell({ account }: { account: Account }) {
             <div className="bar">
               <span style={{ width: empty ? "0%" : `${Math.max(0, Math.min(100, m.percent || 0))}%` }} />
             </div>
+            <div className="quota-reset">{resetText || "—"}</div>
           </div>
         );
       })}

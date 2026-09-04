@@ -261,7 +261,7 @@ button, input, textarea, select { font-family: inherit; }
 }
 .page-head p {
   margin: 0;
-  max-width: 560px;
+  max-width: 720px;
   font-size: 18px;
   font-weight: 500;
   line-height: 1.5;
@@ -594,6 +594,16 @@ button, input, textarea, select { font-family: inherit; }
 .quota-meter.kind-gemini-pro .bar > span { background: var(--brand-coral); }
 .quota-meter.kind-gemini-flash .bar > span { background: var(--brand-blue); }
 .quota-meter.kind-claude .bar > span { background: var(--brand-purple); }
+.quota-reset {
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--steel);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.quota-meter.empty .quota-reset { color: var(--stone); }
 
 .badge {
   display: inline-flex;
@@ -896,8 +906,14 @@ button, input, textarea, select { font-family: inherit; }
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 16px;
+  align-items: stretch;
 }
 .log-kpi {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 96px;
+  height: 100%;
   border: 1px solid var(--hairline);
   border-radius: 16px;
   padding: 16px 18px;
@@ -914,8 +930,14 @@ button, input, textarea, select { font-family: inherit; }
   font-size: 24px;
   letter-spacing: -0.5px;
 }
-.log-kpi.ok strong { color: var(--success-text); }
-.log-kpi.bad strong { color: var(--danger); }
+.log-kpi.is-ok strong { color: var(--success-text); }
+.log-kpi.is-bad strong { color: var(--danger); }
+.log-pager-tools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
 .log-mix {
   display: flex;
   align-items: center;
