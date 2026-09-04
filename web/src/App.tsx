@@ -8,6 +8,7 @@ import Accounts from "./pages/Accounts";
 import ImportPage from "./pages/Import";
 import Monitor from "./pages/Monitor";
 import SettingsPage from "./pages/Settings";
+import Routing from "./pages/Routing";
 
 function Guard({ children }: { children: React.ReactNode }) {
   if (!getToken()) return <Navigate to="/login" replace />;
@@ -30,6 +31,7 @@ export default function App() {
         <Route path="batches" element={<Batches />} />
         <Route path="accounts" element={<Accounts />} />
         <Route path="import" element={<ImportPage />} />
+        <Route path="routes" element={<Routing />} />
         <Route path="monitor" element={<Monitor />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>

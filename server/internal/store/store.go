@@ -741,6 +741,58 @@ GROUP BY d`, heatFrom.Unix())
 	return d, nil
 }
 
+func (s *Store) OfficialModels() ([]models.ModelQuota, map[string]string, error) {
+	rows, err := s.db.Query(`SELECT quota_json FROM accounts WHERE quota_json IS NOT NULL AND quota_json != '' AND quota_json != 'null'`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	seen := map[string]models.ModelQuota{}
+	forwarding := map[string]string{}
+	for rows.Next() {
+		var raw sql.NullString
+		if err := rows.Scan(&raw); err != nil {
+			return nil, nil, err
+		}
+		if !raw.Valid || strings.TrimSpace(raw.String) == "" {
+			continue
+		}
+		var q models.QuotaData
+		if json.Unmarshal([]byte(raw.String), &q) != nil {
+			continue
+		}
+		for _, m := range q.Models {
+			name := strings.TrimSpace(m.Name)
+			if name == "" {
+				continue
+			}
+			key := strings.ToLower(name)
+			prev, ok := seen[key]
+			if !ok {
+				seen[key] = m
+				continue
+			}
+			if strings.TrimSpace(prev.DisplayName) == "" && strings.TrimSpace(m.DisplayName) != "" {
+				seen[key] = m
+			}
+		}
+		for oldID, newID := range q.ForwardingRules {
+			oldID, newID = strings.TrimSpace(oldID), strings.TrimSpace(newID)
+			if oldID == "" || newID == "" {
+				continue
+			}
+			if _, exists := forwarding[oldID]; !exists {
+				forwarding[oldID] = newID
+			}
+		}
+	}
+	out := make([]models.ModelQuota, 0, len(seen))
+	for _, m := range seen {
+		out = append(out, m)
+	}
+	return out, forwarding, rows.Err()
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }

@@ -7,19 +7,19 @@ import (
 )
 
 type OpenAIRequest struct {
-	Model            string          `json:"model"`
-	Messages         []OpenAIMessage `json:"messages"`
-	Input            any             `json:"input"`
-	Instructions     string          `json:"instructions"`
-	Tools            []any           `json:"tools"`
-	Stream           bool            `json:"stream"`
-	Temperature      *float64        `json:"temperature"`
-	TopP             *float64        `json:"top_p"`
-	MaxTokens        *int            `json:"max_tokens"`
-	MaxOutputTokens  *int            `json:"max_output_tokens"`
-	Thinking         *OpenAIThinking `json:"thinking"`
-	Reasoning        *OpenAIThinking `json:"reasoning"`
-	ToolChoice       any             `json:"tool_choice"`
+	Model           string          `json:"model"`
+	Messages        []OpenAIMessage `json:"messages"`
+	Input           any             `json:"input"`
+	Instructions    string          `json:"instructions"`
+	Tools           []any           `json:"tools"`
+	Stream          bool            `json:"stream"`
+	Temperature     *float64        `json:"temperature"`
+	TopP            *float64        `json:"top_p"`
+	MaxTokens       *int            `json:"max_tokens"`
+	MaxOutputTokens *int            `json:"max_output_tokens"`
+	Thinking        *OpenAIThinking `json:"thinking"`
+	Reasoning       *OpenAIThinking `json:"reasoning"`
+	ToolChoice      any             `json:"tool_choice"`
 }
 
 type OpenAIThinking struct {

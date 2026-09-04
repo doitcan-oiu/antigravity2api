@@ -4,17 +4,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/wo/antigravity2api/internal/config"
+	"github.com/wo/antigravity2api/internal/outbound"
 )
 
 const (
-	tokenURL   = "https://oauth2.googleapis.com/token"
+	tokenURL    = "https://oauth2.googleapis.com/token"
 	userInfoURL = "https://www.googleapis.com/oauth2/v2/userinfo"
 	refreshSkew = int64(900)
 )
@@ -44,26 +44,19 @@ func (u UserInfo) DisplayName() string {
 }
 
 type Client struct {
-	cfg    config.Config
-	http   *http.Client
+	cfg config.Config
+	out *outbound.Manager
 }
 
-func New(cfg config.Config) *Client {
-	return &Client{
-		cfg: cfg,
-		http: &http.Client{
-			Timeout: 20 * time.Second,
-			Transport: &http.Transport{
-				Proxy: http.ProxyFromEnvironment,
-				DialContext: (&net.Dialer{
-					Timeout:   8 * time.Second,
-					KeepAlive: 30 * time.Second,
-				}).DialContext,
-				TLSHandshakeTimeout:   8 * time.Second,
-				ResponseHeaderTimeout: 12 * time.Second,
-			},
-		},
+func New(cfg config.Config, out *outbound.Manager) *Client {
+	if out == nil {
+		out = outbound.New()
 	}
+	return &Client{cfg: cfg, out: out}
+}
+
+func (c *Client) client() *http.Client {
+	return c.out.Client(20 * time.Second)
 }
 
 func (c *Client) Refresh(refreshToken string) (*TokenResponse, error) {
@@ -80,7 +73,7 @@ func (c *Client) Refresh(refreshToken string) (*TokenResponse, error) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("User-Agent", c.cfg.OAuthUserAgent)
 
-	resp, err := c.http.Do(req)
+	resp, err := c.client().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("refresh request failed: %w", err)
 	}
@@ -109,7 +102,7 @@ func (c *Client) UserInfo(accessToken string) (*UserInfo, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("User-Agent", c.cfg.OAuthUserAgent)
-	resp, err := c.http.Do(req)
+	resp, err := c.client().Do(req)
 	if err != nil {
 		return nil, err
 	}

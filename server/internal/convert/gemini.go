@@ -60,6 +60,33 @@ func UnwrapGemini(raw []byte) ([]byte, error) {
 	return raw, nil
 }
 
+func StampGeminiModel(raw []byte, model string) []byte {
+	if strings.TrimSpace(model) == "" || len(raw) == 0 {
+		return raw
+	}
+	var payload map[string]any
+	if json.Unmarshal(raw, &payload) != nil {
+		return raw
+	}
+	stampGeminiModel(payload, model)
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+func stampGeminiModel(payload map[string]any, model string) {
+	if payload == nil || strings.TrimSpace(model) == "" {
+		return
+	}
+	payload["model"] = model
+	payload["modelVersion"] = model
+	if name := AsString(payload["name"]); strings.Contains(name, "models/") {
+		payload["name"] = "models/" + model
+	}
+}
+
 func ParseModelPath(path string) (model string, action string) {
 	// /v1beta/models/gemini-2.5-flash:generateContent
 	path = strings.TrimPrefix(path, "/v1beta/models/")

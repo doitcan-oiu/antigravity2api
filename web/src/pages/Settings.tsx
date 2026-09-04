@@ -18,6 +18,8 @@ export default function SettingsPage() {
             ...data,
             enable_logging: Boolean(data.enable_logging),
             skip_expired_accounts: Boolean(data.skip_expired_accounts),
+            proxy_enabled: Boolean(data.proxy_enabled),
+            proxy_url: data.proxy_url || "",
           });
         }
       })
@@ -117,6 +119,35 @@ export default function SettingsPage() {
               label="记录请求日志"
             />
           </div>
+        </section>
+
+        <section className="panel">
+          <h2>出站代理</h2>
+          <div className="setting-row" style={{ borderTop: "none", paddingTop: 0 }}>
+            <div className="setting-copy">
+              <div className="setting-title">启用代理</div>
+              <div className="setting-desc">打开后，刷新令牌、拉配额、对话请求都会走这个代理</div>
+            </div>
+            <Toggle
+              checked={form.proxy_enabled}
+              onChange={(v) => setForm({ ...form, proxy_enabled: v })}
+              label="启用代理"
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="proxy">代理地址</label>
+            <input
+              id="proxy"
+              value={form.proxy_url}
+              onChange={(e) => setForm({ ...form, proxy_url: e.target.value })}
+              placeholder="socks5://user:pass@host:port"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </div>
+          <p className="muted" style={{ fontSize: 14, margin: 0 }}>
+            支持 socks5、http、https。轮换代理建议关掉连接复用，系统会按每次请求新建连接。
+          </p>
         </section>
 
         {err ? <p className="err">{err}</p> : null}

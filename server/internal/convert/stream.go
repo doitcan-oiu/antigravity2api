@@ -240,7 +240,7 @@ func WriteClaudeSSE(dst io.Writer, model string, src io.Reader) error {
 	return nil
 }
 
-func WriteGeminiSSE(dst io.Writer, src io.Reader) error {
+func WriteGeminiSSE(dst io.Writer, model string, src io.Reader) error {
 	reader := bufio.NewReader(src)
 	var buf bytes.Buffer
 	for {
@@ -261,6 +261,7 @@ func WriteGeminiSSE(dst io.Writer, src io.Reader) error {
 			if !ok {
 				continue
 			}
+			stampGeminiModel(payload, model)
 			b, _ := json.Marshal(payload)
 			fmt.Fprintf(dst, "data: %s\n\n", b)
 		}

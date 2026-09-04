@@ -1,14 +1,16 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/wo/antigravity2api/internal/convert"
+	"github.com/google/uuid"
 	"github.com/wo/antigravity2api/internal/models"
+	"github.com/wo/antigravity2api/internal/outbound"
 )
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -17,7 +19,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
-	d.CatalogModels = len(convert.Catalog())
+	d.CatalogModels = len(s.modelCatalog())
 	d.HasAPIKey = strings.TrimSpace(s.store.GetSetting("api_key", s.cfg.APIKey)) != ""
 	writeJSON(w, 200, d)
 }
@@ -30,12 +32,19 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		EnableLogging:       s.loggingEnabled(),
 		ListenAddr:          s.cfg.ListenAddr,
 		BatchValidityDays:   atoi(s.store.GetSetting("batch_validity_days", strconv.Itoa(s.cfg.BatchValidityDays)), s.cfg.BatchValidityDays),
+		ProxyEnabled:        s.store.BoolSetting("proxy_enabled", false),
+		ProxyURL:            s.store.GetSetting("proxy_url", ""),
 	})
 }
 
 func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	var body models.Settings
 	if err := readJSON(r, &body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	proxyURL := outbound.Normalize(body.ProxyURL)
+	if err := s.out.Apply(body.ProxyEnabled, proxyURL); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
@@ -58,6 +67,12 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	if body.BatchValidityDays > 0 {
 		_ = s.store.SetSetting("batch_validity_days", strconv.Itoa(body.BatchValidityDays))
 	}
+	proxyOn := "false"
+	if body.ProxyEnabled {
+		proxyOn = "true"
+	}
+	_ = s.store.SetSetting("proxy_enabled", proxyOn)
+	_ = s.store.SetSetting("proxy_url", proxyURL)
 	s.getSettings(w, r)
 }
 
@@ -233,7 +248,65 @@ func (s *Server) listLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"items": convert.Catalog()})
+	writeJSON(w, 200, map[string]any{"items": s.modelCatalog()})
+}
+
+func (s *Server) listModelRoutes(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{"items": s.loadMixRules()})
+}
+
+func (s *Server) putModelRoutes(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Items []models.MixRule `json:"items"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	out := make([]models.MixRule, 0, len(body.Items))
+	for _, item := range body.Items {
+		from := strings.TrimSpace(item.From)
+		to := strings.TrimSpace(item.To)
+		if from == "" || to == "" {
+			continue
+		}
+		if item.Percent < 0 {
+			item.Percent = 0
+		}
+		if item.Percent > 100 {
+			item.Percent = 100
+		}
+		if strings.TrimSpace(item.ID) == "" {
+			item.ID = uuid.NewString()
+		}
+		item.From, item.To = from, to
+		out = append(out, item)
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := s.store.SetSetting("model_routes", string(raw)); err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"items": out})
+}
+
+func (s *Server) loadMixRules() []models.MixRule {
+	raw := strings.TrimSpace(s.store.GetSetting("model_routes", "[]"))
+	if raw == "" {
+		return []models.MixRule{}
+	}
+	var items []models.MixRule
+	if json.Unmarshal([]byte(raw), &items) != nil {
+		return []models.MixRule{}
+	}
+	if items == nil {
+		return []models.MixRule{}
+	}
+	return items
 }
 
 func atoi(s string, fallback int) int {

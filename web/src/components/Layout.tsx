@@ -16,6 +16,7 @@ const groups = [
   {
     title: "运行",
     items: [
+      { to: "/routes", label: "模型路由" },
       { to: "/monitor", label: "监控" },
       { to: "/settings", label: "设置" },
     ],

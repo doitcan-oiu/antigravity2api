@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math/rand"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -15,7 +16,7 @@ import (
 )
 
 func (s *Server) openaiModels(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"object": "list", "data": convert.Catalog()})
+	writeJSON(w, 200, map[string]any{"object": "list", "data": s.modelCatalog()})
 }
 
 func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
@@ -24,11 +25,13 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
-	s.proxy(w, r, "openai", req.Model, req.Stream, func(projectID, email, accountID string) (any, string, bool, error) {
+	original := req.Model
+	req.Model = s.routeModel(original)
+	s.proxy(w, r, "openai", original, req.Stream, func(projectID, email, accountID string) (any, string, bool, error) {
 		outer, mapped, stream := convert.OpenAIToGemini(req, projectID, email, accountID)
 		return outer, mapped, stream, nil
-	}, func(mapped string, raw []byte) ([]byte, error) {
-		return convert.GeminiToOpenAI(mapped, raw, "chatcmpl-"+strconv.FormatInt(time.Now().UnixNano(), 36))
+	}, func(report string, raw []byte) ([]byte, error) {
+		return convert.GeminiToOpenAI(report, raw, "chatcmpl-"+strconv.FormatInt(time.Now().UnixNano(), 36))
 	}, convert.WriteOpenAISSE)
 }
 
@@ -38,22 +41,28 @@ func (s *Server) claudeMessages(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": map[string]any{"type": "invalid_request_error", "message": err.Error()}})
 		return
 	}
-	s.proxy(w, r, "claude", req.Model, req.Stream, func(projectID, email, accountID string) (any, string, bool, error) {
+	original := req.Model
+	req.Model = s.routeModel(original)
+	s.proxy(w, r, "claude", original, req.Stream, func(projectID, email, accountID string) (any, string, bool, error) {
 		outer, mapped, stream := convert.ClaudeToGemini(req, projectID, email, accountID)
 		return outer, mapped, stream, nil
 	}, convert.GeminiToClaude, convert.WriteClaudeSSE)
 }
 
 func (s *Server) geminiList(w http.ResponseWriter, r *http.Request) {
-	models := convert.Catalog()
-	out := make([]any, 0, len(models))
-	for _, m := range models {
+	catalog := s.modelCatalog()
+	out := make([]any, 0, len(catalog))
+	for _, m := range catalog {
 		id, _ := m["id"].(string)
+		display, _ := m["display_name"].(string)
+		if display == "" {
+			display = id
+		}
 		out = append(out, map[string]any{
 			"name":                       "models/" + id,
-			"version":                    "1.0",
-			"displayName":                id,
-			"supportedGenerationMethods": []string{"generateContent", "streamGenerateContent"},
+			"version":                    "001",
+			"displayName":                display,
+			"supportedGenerationMethods": []string{"generateContent", "streamGenerateContent", "countTokens"},
 		})
 	}
 	writeJSON(w, 200, map[string]any{"models": out})
@@ -77,11 +86,19 @@ func (s *Server) geminiGenerate(w http.ResponseWriter, r *http.Request) {
 	if v, ok := body["stream"].(bool); ok && v {
 		stream = true
 	}
-	s.proxy(w, r, "gemini", model, stream, func(projectID, email, accountID string) (any, string, bool, error) {
+	original := model
+	model = s.routeModel(original)
+	s.proxy(w, r, "gemini", original, stream, func(projectID, email, accountID string) (any, string, bool, error) {
 		outer, mapped, st := convert.NativeGeminiToInternal(body, model, projectID, email, accountID)
 		return outer, mapped, st || stream, nil
-	}, func(_ string, raw []byte) ([]byte, error) { return convert.UnwrapGemini(raw) }, func(dst io.Writer, _ string, src io.Reader) error {
-		return convert.WriteGeminiSSE(dst, src)
+	}, func(report string, raw []byte) ([]byte, error) {
+		out, err := convert.UnwrapGemini(raw)
+		if err != nil {
+			return nil, err
+		}
+		return convert.StampGeminiModel(out, report), nil
+	}, func(dst io.Writer, report string, src io.Reader) error {
+		return convert.WriteGeminiSSE(dst, report, src)
 	})
 }
 
@@ -118,7 +135,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, protocol, model s
 			lastStatus = 400
 			break
 		}
-		mapped = mappedModel
+		mapped = convert.RewriteToAvailable(mappedModel, accountModelNames(acc), accountForwarding(acc))
+		if mapped != mappedModel {
+			if outer, ok := payload.(convert.OuterRequest); ok {
+				outer.Model = mapped
+				payload = outer
+			}
+		}
 		stream = streamFlag || streamHint
 		resp, data, err := s.cc.Generate(ctx, acc.AccessToken, payload, stream)
 		if err != nil {
@@ -180,7 +203,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, protocol, model s
 			w.WriteHeader(200)
 			flusher, _ := w.(http.Flusher)
 			pw := &flushWriter{w: w, f: flusher}
-			if err := toSSE(pw, mapped, resp.Body); err != nil {
+			if err := toSSE(pw, model, resp.Body); err != nil {
 				lastErr = err.Error()
 			}
 			resp.Body.Close()
@@ -194,7 +217,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, protocol, model s
 			s.logReq(protocol, model, mapped, lastID, lastEmail, resp.StatusCode, false, start, lastErr)
 			return
 		}
-		out, err := toJSON(mapped, data)
+		out, err := toJSON(model, data)
 		if err != nil {
 			writeJSON(w, 502, map[string]any{"error": err.Error()})
 			s.logReq(protocol, model, mapped, lastID, lastEmail, 502, false, start, err.Error())
@@ -288,4 +311,58 @@ func clipErr(b []byte) string {
 		return s[:500]
 	}
 	return s
+}
+
+func accountModelNames(acc *models.Account) []string {
+	if acc == nil || acc.Quota == nil {
+		return nil
+	}
+	out := make([]string, 0, len(acc.Quota.Models))
+	for _, m := range acc.Quota.Models {
+		if n := strings.TrimSpace(m.Name); n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func accountForwarding(acc *models.Account) map[string]string {
+	if acc == nil || acc.Quota == nil {
+		return nil
+	}
+	return acc.Quota.ForwardingRules
+}
+
+func (s *Server) modelCatalog() []map[string]any {
+	official, err := s.officialModels()
+	if err != nil {
+		return convert.Catalog()
+	}
+	return convert.BuildCatalog(official)
+}
+
+func (s *Server) officialModels() ([]convert.OfficialModel, error) {
+	rows, _, err := s.store.OfficialModels()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]convert.OfficialModel, 0, len(rows))
+	for _, m := range rows {
+		out = append(out, convert.OfficialModel{ID: m.Name, DisplayName: m.DisplayName})
+	}
+	return out, nil
+}
+
+func (s *Server) routeModel(requested string) string {
+	rules := s.loadMixRules()
+	converted := make([]convert.MixRule, 0, len(rules))
+	for _, rule := range rules {
+		converted = append(converted, convert.MixRule{
+			From:    rule.From,
+			To:      rule.To,
+			Percent: rule.Percent,
+			Enabled: rule.Enabled,
+		})
+	}
+	return convert.ApplyMix(requested, converted, rand.Intn(100))
 }

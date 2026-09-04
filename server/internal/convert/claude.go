@@ -9,12 +9,12 @@ import (
 )
 
 type ClaudeRequest struct {
-	Model       string  `json:"model"`
-	Messages    []any   `json:"messages"`
-	System      any     `json:"system"`
-	Tools       []any   `json:"tools"`
-	Stream      bool    `json:"stream"`
-	MaxTokens   *int    `json:"max_tokens"`
+	Model       string   `json:"model"`
+	Messages    []any    `json:"messages"`
+	System      any      `json:"system"`
+	Tools       []any    `json:"tools"`
+	Stream      bool     `json:"stream"`
+	MaxTokens   *int     `json:"max_tokens"`
 	Temperature *float64 `json:"temperature"`
 	TopP        *float64 `json:"top_p"`
 	Thinking    *struct {

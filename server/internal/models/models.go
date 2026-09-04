@@ -100,6 +100,16 @@ type Settings struct {
 	EnableLogging       bool   `json:"enable_logging"`
 	ListenAddr          string `json:"listen_addr"`
 	BatchValidityDays   int    `json:"batch_validity_days"`
+	ProxyEnabled        bool   `json:"proxy_enabled"`
+	ProxyURL            string `json:"proxy_url"`
+}
+
+type MixRule struct {
+	ID      string `json:"id"`
+	From    string `json:"from"`
+	To      string `json:"to"`
+	Percent int    `json:"percent"`
+	Enabled bool   `json:"enabled"`
 }
 
 type Dashboard struct {

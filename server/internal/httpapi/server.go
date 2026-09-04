@@ -14,6 +14,7 @@ import (
 	"github.com/wo/antigravity2api/internal/cloudcode"
 	"github.com/wo/antigravity2api/internal/config"
 	"github.com/wo/antigravity2api/internal/oauth"
+	"github.com/wo/antigravity2api/internal/outbound"
 	"github.com/wo/antigravity2api/internal/pool"
 	"github.com/wo/antigravity2api/internal/store"
 )
@@ -24,18 +25,25 @@ type Server struct {
 	oauth *oauth.Client
 	cc    *cloudcode.Client
 	pool  *pool.Pool
+	out   *outbound.Manager
 	web   fs.FS
 }
 
 func New(cfg config.Config, st *store.Store, webFS fs.FS) *Server {
-	oa := oauth.New(cfg)
-	cc := cloudcode.New(cfg)
+	out := outbound.New()
+	if err := out.Apply(st.BoolSetting("proxy_enabled", false), st.GetSetting("proxy_url", "")); err != nil {
+		log.Printf("ignore stored proxy: %v", err)
+		_ = out.Apply(false, st.GetSetting("proxy_url", ""))
+	}
+	oa := oauth.New(cfg, out)
+	cc := cloudcode.New(cfg, out)
 	return &Server{
 		cfg:   cfg,
 		store: st,
 		oauth: oa,
 		cc:    cc,
 		pool:  pool.New(cfg, st, oa, cc),
+		out:   out,
 		web:   webFS,
 	}
 }
@@ -76,6 +84,8 @@ func (s *Server) Router() http.Handler {
 		r.Post("/accounts/refresh-all", s.refreshAll)
 		r.Get("/logs", s.listLogs)
 		r.Get("/models", s.listModels)
+		r.Get("/model-routes", s.listModelRoutes)
+		r.Put("/model-routes", s.putModelRoutes)
 	})
 
 	r.Group(func(r chi.Router) {

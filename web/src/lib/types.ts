@@ -125,6 +125,16 @@ export type Settings = {
   enable_logging: boolean;
   listen_addr: string;
   batch_validity_days: number;
+  proxy_enabled: boolean;
+  proxy_url: string;
+};
+
+export type MixRule = {
+  id: string;
+  from: string;
+  to: string;
+  percent: number;
+  enabled: boolean;
 };
 
 export type ImportResult = {
