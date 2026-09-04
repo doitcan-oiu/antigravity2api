@@ -83,6 +83,7 @@ func (s *Server) Router() http.Handler {
 		r.Delete("/accounts/{id}", s.deleteAccount)
 		r.Post("/accounts/refresh-all", s.refreshAll)
 		r.Get("/logs", s.listLogs)
+		r.Delete("/logs", s.clearLogs)
 		r.Get("/models", s.listModels)
 		r.Get("/model-routes", s.listModelRoutes)
 		r.Put("/model-routes", s.putModelRoutes)

@@ -244,7 +244,25 @@ func (s *Server) listLogs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"items": list})
+	total, success, errors, err := s.store.LogStats()
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"items":   list,
+		"total":   total,
+		"success": success,
+		"errors":  errors,
+	})
+}
+
+func (s *Server) clearLogs(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.ClearLogs(); err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {

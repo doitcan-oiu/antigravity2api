@@ -26,8 +26,9 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	original := req.Model
-	req.Model = s.routeModel(original)
-	s.proxy(w, r, "openai", original, req.Stream, func(projectID, email, accountID string) (any, string, bool, error) {
+	used, mixed := s.routeModel(original)
+	req.Model = used
+	s.proxy(w, r, "openai", original, mixed, req.Stream, func(projectID, email, accountID string) (any, string, bool, error) {
 		outer, mapped, stream := convert.OpenAIToGemini(req, projectID, email, accountID)
 		return outer, mapped, stream, nil
 	}, func(report string, raw []byte) ([]byte, error) {
@@ -42,8 +43,9 @@ func (s *Server) claudeMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	original := req.Model
-	req.Model = s.routeModel(original)
-	s.proxy(w, r, "claude", original, req.Stream, func(projectID, email, accountID string) (any, string, bool, error) {
+	used, mixed := s.routeModel(original)
+	req.Model = used
+	s.proxy(w, r, "claude", original, mixed, req.Stream, func(projectID, email, accountID string) (any, string, bool, error) {
 		outer, mapped, stream := convert.ClaudeToGemini(req, projectID, email, accountID)
 		return outer, mapped, stream, nil
 	}, convert.GeminiToClaude, convert.WriteClaudeSSE)
@@ -87,8 +89,9 @@ func (s *Server) geminiGenerate(w http.ResponseWriter, r *http.Request) {
 		stream = true
 	}
 	original := model
-	model = s.routeModel(original)
-	s.proxy(w, r, "gemini", original, stream, func(projectID, email, accountID string) (any, string, bool, error) {
+	used, mixed := s.routeModel(original)
+	model = used
+	s.proxy(w, r, "gemini", original, mixed, stream, func(projectID, email, accountID string) (any, string, bool, error) {
 		outer, mapped, st := convert.NativeGeminiToInternal(body, model, projectID, email, accountID)
 		return outer, mapped, st || stream, nil
 	}, func(report string, raw []byte) ([]byte, error) {
@@ -106,7 +109,7 @@ type buildFn func(projectID, email, accountID string) (payload any, mapped strin
 type toJSONFn func(mapped string, raw []byte) ([]byte, error)
 type toSSEFn func(dst io.Writer, model string, src io.Reader) error
 
-func (s *Server) proxy(w http.ResponseWriter, r *http.Request, protocol, model string, streamHint bool, build buildFn, toJSON toJSONFn, toSSE toSSEFn) {
+func (s *Server) proxy(w http.ResponseWriter, r *http.Request, protocol, model string, mixed, streamHint bool, build buildFn, toJSON toJSONFn, toSSE toSSEFn) {
 	start := time.Now()
 	exclude := map[string]struct{}{}
 	var lastStatus int
@@ -194,7 +197,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, protocol, model s
 				lastStatus = resp.StatusCode
 				lastErr = clipErr(body)
 				writeJSON(w, resp.StatusCode, map[string]any{"error": lastErr})
-				s.logReq(protocol, model, mapped, lastID, lastEmail, resp.StatusCode, true, start, lastErr)
+				s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, resp.StatusCode, true, start, lastErr)
 				return
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -207,26 +210,26 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, protocol, model s
 				lastErr = err.Error()
 			}
 			resp.Body.Close()
-			s.logReq(protocol, model, mapped, lastID, lastEmail, 200, true, start, lastErr)
+			s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, 200, true, start, lastErr)
 			return
 		}
 		if resp.StatusCode >= 400 {
 			lastStatus = resp.StatusCode
 			lastErr = clipErr(data)
 			writeJSON(w, resp.StatusCode, map[string]any{"error": lastErr})
-			s.logReq(protocol, model, mapped, lastID, lastEmail, resp.StatusCode, false, start, lastErr)
+			s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, resp.StatusCode, false, start, lastErr)
 			return
 		}
 		out, err := toJSON(model, data)
 		if err != nil {
 			writeJSON(w, 502, map[string]any{"error": err.Error()})
-			s.logReq(protocol, model, mapped, lastID, lastEmail, 502, false, start, err.Error())
+			s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, 502, false, start, err.Error())
 			return
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(200)
 		_, _ = w.Write(out)
-		s.logReq(protocol, model, mapped, lastID, lastEmail, 200, false, start, "")
+		s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, 200, false, start, "")
 		return
 	}
 
@@ -237,14 +240,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, protocol, model s
 		lastErr = "no available accounts"
 	}
 	writeJSON(w, lastStatus, map[string]any{"error": lastErr})
-	s.logReq(protocol, model, mapped, lastID, lastEmail, lastStatus, stream, start, lastErr)
+	s.logReq(protocol, model, mapped, mixed, lastID, lastEmail, lastStatus, stream, start, lastErr)
 }
 
 func (s *Server) loggingEnabled() bool {
 	return s.store.BoolSetting("enable_logging", true)
 }
 
-func (s *Server) logReq(protocol, model, mapped, accID, email string, status int, stream bool, start time.Time, errMsg string) {
+func (s *Server) logReq(protocol, model, mapped string, mixed bool, accID, email string, status int, stream bool, start time.Time, errMsg string) {
 	if !s.loggingEnabled() {
 		return
 	}
@@ -258,6 +261,7 @@ func (s *Server) logReq(protocol, model, mapped, accID, email string, status int
 		Stream:       stream,
 		LatencyMS:    time.Since(start).Milliseconds(),
 		Error:        errMsg,
+		Mixed:        mixed,
 	})
 }
 
@@ -353,7 +357,7 @@ func (s *Server) officialModels() ([]convert.OfficialModel, error) {
 	return out, nil
 }
 
-func (s *Server) routeModel(requested string) string {
+func (s *Server) routeModel(requested string) (string, bool) {
 	rules := s.loadMixRules()
 	converted := make([]convert.MixRule, 0, len(rules))
 	for _, rule := range rules {
@@ -364,5 +368,6 @@ func (s *Server) routeModel(requested string) string {
 			Enabled: rule.Enabled,
 		})
 	}
-	return convert.ApplyMix(requested, converted, rand.Intn(100))
+	used := convert.ApplyMix(requested, converted, rand.Intn(100))
+	return used, used != requested
 }

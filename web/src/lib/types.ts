@@ -116,6 +116,7 @@ export type RequestLog = {
   stream: boolean;
   latency_ms: number;
   error?: string;
+  mixed?: boolean;
 };
 
 export type Settings = {

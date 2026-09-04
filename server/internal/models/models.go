@@ -91,6 +91,7 @@ type RequestLog struct {
 	Stream       bool   `json:"stream"`
 	LatencyMS    int64  `json:"latency_ms"`
 	Error        string `json:"error,omitempty"`
+	Mixed        bool   `json:"mixed"`
 }
 
 type Settings struct {

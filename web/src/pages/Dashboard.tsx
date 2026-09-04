@@ -39,24 +39,36 @@ function niceMax(n: number) {
 }
 
 function TrendChart({ points }: { points: TrendPoint[] }) {
+  const total = points.reduce((a, p) => a + (p.requests || 0), 0);
+  if (!points.length || total === 0) {
+    return <p className="dash-empty">这段时间还没有请求。</p>;
+  }
   const w = 720;
   const h = 240;
   const pad = { l: 48, r: 16, t: 18, b: 32 };
   const innerW = w - pad.l - pad.r;
   const innerH = h - pad.t - pad.b;
-  const max = niceMax(Math.max(0, ...points.map((p) => p.requests)));
-  const barW = points.length ? Math.max(2, (innerW / points.length) * 0.62) : 8;
-  const step = points.length ? innerW / points.length : innerW;
+  const max = niceMax(Math.max(0, ...points.map((p) => Math.max(p.requests || 0, p.errors || 0))));
+  const step = innerW / points.length;
   const ticks = 4;
   const yTicks = Array.from({ length: ticks + 1 }, (_, i) => Math.round((max * (ticks - i)) / ticks));
   const labelEvery = Math.max(1, Math.ceil(points.length / 6));
-  const line = points
-    .map((p, i) => {
-      const x = pad.l + step * i + step / 2;
-      const y = pad.t + innerH - (p.errors / max) * innerH;
-      return `${i === 0 ? "M" : "L"}${x} ${y}`;
-    })
-    .join(" ");
+  const xy = (value: number, i: number) => {
+    const x = pad.l + step * i + step / 2;
+    const y = pad.t + innerH - (Math.max(0, value) / max) * innerH;
+    return { x, y };
+  };
+  const reqPath = points.map((p, i) => {
+    const { x, y } = xy(p.requests, i);
+    return `${i === 0 ? "M" : "L"}${x} ${y}`;
+  }).join(" ");
+  const errPath = points.map((p, i) => {
+    const { x, y } = xy(p.errors, i);
+    return `${i === 0 ? "M" : "L"}${x} ${y}`;
+  }).join(" ");
+  const last = xy(points[points.length - 1].requests, points.length - 1);
+  const first = xy(points[0].requests, 0);
+  const area = `${reqPath} L${last.x} ${pad.t + innerH} L${first.x} ${pad.t + innerH} Z`;
 
   return (
     <svg viewBox={`0 0 ${w} ${h}`} className="dash-svg">
@@ -71,12 +83,13 @@ function TrendChart({ points }: { points: TrendPoint[] }) {
           </g>
         );
       })}
+      {points.length > 1 ? <path d={area} className="dash-area" /> : null}
+      {points.length > 1 ? <path d={reqPath} className="dash-req" /> : null}
+      {points.length > 1 ? <path d={errPath} className="dash-line" /> : null}
       {points.map((p, i) => {
-        const x = pad.l + step * i + (step - barW) / 2;
-        const bh = (p.requests / max) * innerH;
-        return <rect key={p.bucket} x={x} y={pad.t + innerH - bh} width={barW} height={Math.max(0, bh)} rx="2" className="dash-bar" />;
+        const { x, y } = xy(p.requests, i);
+        return <circle key={p.bucket} cx={x} cy={y} r="3" className="dash-dot" />;
       })}
-      {points.length > 1 ? <path d={line} className="dash-line" /> : null}
       {points.map((p, i) =>
         i % labelEvery === 0 ? (
           <text key={p.bucket + "-l"} x={pad.l + step * i + step / 2} y={h - 10} textAnchor="middle" className="dash-axis">
@@ -129,11 +142,25 @@ function ProtocolCard({ items, successRate }: { items: ProtocolStat[]; successRa
   );
 }
 
+function heatLevel(n: number) {
+  if (n <= 0) return 0;
+  if (n <= 100) return 1;
+  if (n <= 10000) return 2;
+  if (n <= 50000) return 3;
+  return 4;
+}
+
+function mondayIndex(iso?: string) {
+  if (!iso) return 0;
+  const [y, m, d] = iso.split("-").map(Number);
+  const w = new Date(Date.UTC(y, (m || 1) - 1, d || 1)).getUTCDay();
+  return w === 0 ? 6 : w - 1;
+}
+
 function Heatmap({ start, end, days }: { start: string; end: string; days: number[] }) {
-  const cells = [...days];
+  const lead = mondayIndex(start);
+  const cells = [...Array(lead).fill(-1), ...days];
   while (cells.length > 0 && cells.length % 7 !== 0) cells.push(-1);
-  const weeks = Math.max(1, Math.ceil(cells.length / 7));
-  const max = Math.max(1, ...days);
   const total = days.reduce((a, b) => a + b, 0);
   return (
     <section className="dash-card">
@@ -145,19 +172,19 @@ function Heatmap({ start, end, days }: { start: string; end: string; days: numbe
       <div className="heat-range">
         {fmtDay(start)} – {fmtDay(end)}
       </div>
-      <div className="heat-grid" style={{ gridTemplateColumns: `repeat(${weeks}, 11px)` }}>
+      <div className="heat-grid">
         {cells.map((n, i) => (
-          <span key={i} className={`heat-cell lv-${n < 0 ? "0" : n === 0 ? "0" : n < max * 0.25 ? "1" : n < max * 0.5 ? "2" : n < max * 0.75 ? "3" : "4"}`} title={n < 0 ? "" : `${n} 次`} />
+          <span key={i} className={`heat-cell lv-${n < 0 ? "empty" : heatLevel(n)}`} title={n < 0 ? "" : `${n} 次`} />
         ))}
       </div>
       <div className="heat-legend">
-        少
+        0
         <span className="heat-cell lv-0" />
         <span className="heat-cell lv-1" />
         <span className="heat-cell lv-2" />
         <span className="heat-cell lv-3" />
         <span className="heat-cell lv-4" />
-        多
+        5万+
       </div>
     </section>
   );

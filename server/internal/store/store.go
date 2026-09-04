@@ -89,7 +89,8 @@ CREATE TABLE IF NOT EXISTS request_logs (
   status INTEGER,
   stream INTEGER,
   latency_ms INTEGER,
-  error TEXT
+  error TEXT,
+  mixed INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
@@ -104,6 +105,7 @@ CREATE INDEX IF NOT EXISTS idx_accounts_pick ON accounts(disabled, last_used);
 	}
 	_, _ = s.db.Exec(`ALTER TABLE batches ADD COLUMN purchased_at INTEGER`)
 	_, _ = s.db.Exec(`UPDATE batches SET purchased_at = created_at WHERE purchased_at IS NULL OR purchased_at = 0`)
+	_, _ = s.db.Exec(`ALTER TABLE request_logs ADD COLUMN mixed INTEGER NOT NULL DEFAULT 0`)
 	return nil
 }
 
@@ -422,9 +424,9 @@ func (s *Store) AddLog(l models.RequestLog) error {
 func (s *Store) logWorker() {
 	for l := range s.logCh {
 		_, _ = s.db.Exec(`
-INSERT INTO request_logs(created_at, protocol, model, mapped_model, account_id, account_email, status, stream, latency_ms, error)
-VALUES(?,?,?,?,?,?,?,?,?,?)`,
-			l.CreatedAt, l.Protocol, l.Model, l.MappedModel, l.AccountID, l.AccountEmail, l.Status, boolToInt(l.Stream), l.LatencyMS, l.Error)
+INSERT INTO request_logs(created_at, protocol, model, mapped_model, account_id, account_email, status, stream, latency_ms, error, mixed)
+VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			l.CreatedAt, l.Protocol, l.Model, l.MappedModel, l.AccountID, l.AccountEmail, l.Status, boolToInt(l.Stream), l.LatencyMS, l.Error, boolToInt(l.Mixed))
 	}
 }
 
@@ -435,12 +437,36 @@ func (s *Store) TrimLogs(keep int) {
 	_, _ = s.db.Exec(`DELETE FROM request_logs WHERE id < COALESCE((SELECT MAX(id) FROM request_logs), 0) - ?`, keep)
 }
 
+func (s *Store) ClearLogs() error {
+	_, err := s.db.Exec(`DELETE FROM request_logs`)
+	return err
+}
+
+func (s *Store) LogStats() (total, success, errors int, err error) {
+	var ok, bad sql.NullInt64
+	err = s.db.QueryRow(`
+SELECT COUNT(*),
+       SUM(CASE WHEN status < 400 THEN 1 ELSE 0 END),
+       SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END)
+FROM request_logs`).Scan(&total, &ok, &bad)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if ok.Valid {
+		success = int(ok.Int64)
+	}
+	if bad.Valid {
+		errors = int(bad.Int64)
+	}
+	return total, success, errors, nil
+}
+
 func (s *Store) ListLogs(limit int) ([]models.RequestLog, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := s.db.Query(`
-SELECT id, created_at, protocol, model, mapped_model, account_id, account_email, status, stream, latency_ms, error
+SELECT id, created_at, protocol, model, mapped_model, account_id, account_email, status, stream, latency_ms, error, COALESCE(mixed, 0)
 FROM request_logs ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -449,11 +475,12 @@ FROM request_logs ORDER BY id DESC LIMIT ?`, limit)
 	out := make([]models.RequestLog, 0)
 	for rows.Next() {
 		var l models.RequestLog
-		var stream int
-		if err := rows.Scan(&l.ID, &l.CreatedAt, &l.Protocol, &l.Model, &l.MappedModel, &l.AccountID, &l.AccountEmail, &l.Status, &stream, &l.LatencyMS, &l.Error); err != nil {
+		var stream, mixed int
+		if err := rows.Scan(&l.ID, &l.CreatedAt, &l.Protocol, &l.Model, &l.MappedModel, &l.AccountID, &l.AccountEmail, &l.Status, &stream, &l.LatencyMS, &l.Error, &mixed); err != nil {
 			return nil, err
 		}
 		l.Stream = stream == 1
+		l.Mixed = mixed == 1
 		out = append(out, l)
 	}
 	return out, rows.Err()
@@ -473,15 +500,21 @@ func normalizeRange(v string) string {
 }
 
 func rangeStart(key string, now time.Time) (from int64, hourly bool, buckets int) {
+	loc := time.FixedZone("CST", 8*3600)
+	now = now.In(loc)
 	switch key {
 	case "24h":
-		return now.Add(-24 * time.Hour).Unix(), true, 24
+		start := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, loc).Add(-23 * time.Hour)
+		return start.Unix(), true, 24
 	case "7d":
-		return now.Add(-7 * 24 * time.Hour).Unix(), false, 7
+		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -6)
+		return start.Unix(), false, 7
 	case "90d":
-		return now.Add(-90 * 24 * time.Hour).Unix(), false, 90
+		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -89)
+		return start.Unix(), false, 90
 	default:
-		return now.Add(-30 * 24 * time.Hour).Unix(), false, 30
+		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -29)
+		return start.Unix(), false, 30
 	}
 }
 
@@ -579,9 +612,9 @@ FROM request_logs WHERE created_at >= ?`, from).Scan(&d.Requests, &errs, &avg, &
 	}
 	d.SuccessRate = rate(d.Requests-d.Errors, d.Requests)
 
-	bucketSQL := `strftime('%Y-%m-%d', created_at + 28800, 'unixepoch')`
+	bucketSQL := `strftime('%Y-%m-%d', created_at, 'unixepoch', '+8 hours')`
 	if hourly {
-		bucketSQL = `strftime('%Y-%m-%d %H:00', created_at + 28800, 'unixepoch')`
+		bucketSQL = `strftime('%Y-%m-%d %H:00', created_at, 'unixepoch', '+8 hours')`
 	}
 	trendRows, err := s.db.Query(`
 SELECT `+bucketSQL+` AS bucket, COUNT(*), SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), AVG(latency_ms)
@@ -705,7 +738,7 @@ GROUP BY name ORDER BY COUNT(*) DESC LIMIT 10`, from)
 	heatDays := 140
 	heatFrom := cstDate(now.Unix()).AddDate(0, 0, -(heatDays - 1))
 	heatRows, err := s.db.Query(`
-SELECT strftime('%Y-%m-%d', created_at + 28800, 'unixepoch') AS d, COUNT(*)
+SELECT strftime('%Y-%m-%d', created_at, 'unixepoch', '+8 hours') AS d, COUNT(*)
 FROM request_logs WHERE created_at >= ?
 GROUP BY d`, heatFrom.Unix())
 	if err != nil {

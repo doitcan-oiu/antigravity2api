@@ -891,6 +891,39 @@ button, input, textarea, select { font-family: inherit; }
   font-size: 14px;
 }
 .data-table tr:last-child td { border-bottom: 0; }
+.log-kpis {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.log-kpi {
+  border: 1px solid var(--hairline);
+  border-radius: 16px;
+  padding: 16px 18px;
+  background: var(--surface);
+}
+.log-kpi span {
+  display: block;
+  font-size: 13px;
+  color: var(--steel);
+}
+.log-kpi strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 24px;
+  letter-spacing: -0.5px;
+}
+.log-kpi.ok strong { color: var(--success-text); }
+.log-kpi.bad strong { color: var(--danger); }
+.log-mix {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--slate);
+}
 
 .code {
   background: var(--primary);
@@ -1078,6 +1111,9 @@ button, input, textarea, select { font-family: inherit; }
 .dash-grid { stroke: var(--hairline); stroke-width: 1; }
 .dash-axis { fill: var(--stone); font-size: 10px; }
 .dash-bar { fill: var(--success-text); }
+.dash-area { fill: rgba(27, 166, 115, 0.16); }
+.dash-req { fill: none; stroke: var(--success-text); stroke-width: 2.5; }
+.dash-dot { fill: var(--success-text); }
 .dash-line { fill: none; stroke: var(--brand-blue); stroke-width: 2; }
 .proto-spark {
   display: flex;
@@ -1140,6 +1176,7 @@ button, input, textarea, select { font-family: inherit; }
   background: var(--hairline);
   flex: none;
 }
+.heat-cell.lv-empty { background: transparent; }
 .heat-cell.lv-0 { background: var(--hairline); }
 .heat-cell.lv-1 { background: #b7ebd0; }
 .heat-cell.lv-2 { background: #6fd4a2; }
