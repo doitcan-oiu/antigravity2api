@@ -177,9 +177,9 @@ export default function Monitor() {
           ))}
         </div>
         <div className="log-mini-stats">
-          <span>总计 {fmtCount(stats.total)}</span>
-          <span className="ok">正常 {fmtCount(stats.success)}</span>
-          <span className="bad">错误 {fmtCount(stats.errors)}</span>
+          <span>总计<b>{fmtCount(stats.total)}</b></span>
+          <span className="ok">正常<b>{fmtCount(stats.success)}</b></span>
+          <span className="bad">错误<b>{fmtCount(stats.errors)}</b></span>
         </div>
       </div>
 
