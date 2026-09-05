@@ -145,9 +145,6 @@ func OpenAIToGemini(req OpenAIRequest, projectID, email, accountID string) (Oute
 			"includeThoughts": true,
 			"thinkingBudget":  budget,
 		}
-		if maxTok > 0 && maxTok <= budget {
-			gen["maxOutputTokens"] = budget + 1024
-		}
 	}
 
 	inner := InnerRequest{
@@ -392,6 +389,9 @@ func GeminiToOpenAI(model string, raw []byte, streamID string) ([]byte, error) {
 		data = r
 	}
 	text, thinking, toolCalls, finish, usage := collectParts(data)
+	if text == "" && thinking != "" && len(toolCalls) == 0 {
+		text = thinking
+	}
 	msg := map[string]any{"role": "assistant", "content": text}
 	if thinking != "" {
 		msg["reasoning_content"] = thinking
@@ -459,7 +459,7 @@ func collectParts(data map[string]any) (text, thinking string, toolCalls []any, 
 			if t == "" {
 				continue
 			}
-			if thought, _ := part["thought"].(bool); thought {
+			if partIsThought(part) {
 				thinking += t
 			} else {
 				text += t

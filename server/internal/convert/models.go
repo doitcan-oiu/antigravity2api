@@ -239,8 +239,22 @@ func IsImageModel(model string) bool {
 
 func DefaultThinkingBudget(model string) int {
 	m := strings.ToLower(model)
-	if strings.Contains(m, "pro") {
+	if strings.Contains(m, "claude-opus-4-6") {
+		return 24576
+	}
+	if strings.Contains(m, "gemini-3.1-pro") || strings.Contains(m, "gemini-3-pro-high") {
+		return 49152
+	}
+	if strings.Contains(m, "pro") || strings.Contains(m, "flash") || strings.Contains(m, "thinking") {
 		return 32768
 	}
 	return 8192
+}
+
+func MaxOutputTokens(model string) int {
+	m := strings.ToLower(model)
+	if strings.Contains(m, "claude") {
+		return 64000
+	}
+	return 65536
 }

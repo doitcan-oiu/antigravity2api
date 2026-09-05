@@ -91,9 +91,6 @@ func ClaudeToGemini(req ClaudeRequest, projectID, email, accountID string) (Oute
 			budget = *req.Thinking.BudgetTokens
 		}
 		gen["thinkingConfig"] = map[string]any{"includeThoughts": true, "thinkingBudget": budget}
-		if maxTok > 0 && maxTok <= budget {
-			gen["maxOutputTokens"] = budget + 1024
-		}
 	}
 
 	inner := InnerRequest{
@@ -213,6 +210,9 @@ func GeminiToClaude(model string, raw []byte) ([]byte, error) {
 		data = r
 	}
 	text, thinking, toolCalls, finish, usage := collectParts(data)
+	if text == "" && thinking != "" && len(toolCalls) == 0 {
+		text = thinking
+	}
 	content := make([]any, 0)
 	if thinking != "" {
 		content = append(content, map[string]any{"type": "thinking", "thinking": thinking})

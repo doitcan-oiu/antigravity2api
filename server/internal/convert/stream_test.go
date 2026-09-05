@@ -61,3 +61,49 @@ func mustMap(raw []byte) map[string]any {
 	}
 	return m
 }
+
+func TestCollectGeminiJSONSingleNewline(t *testing.T) {
+	src := strings.NewReader("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hel\"}]}}]}}\ndata: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"lo\"}]},\"finishReason\":\"STOP\"}]}}\n")
+	raw, err := CollectGeminiJSON(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _, _, _, _ := collectParts(mustMap(raw))
+	if text != "hello" {
+		t.Fatalf("text %q from %s", text, raw)
+	}
+}
+
+func TestWriteOpenAISSESingleNewline(t *testing.T) {
+	src := strings.NewReader("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}}\n")
+	var buf bytes.Buffer
+	if _, err := WriteOpenAISSE(&buf, "gemini-3.7-flash", src); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `"content":"hi"`) {
+		t.Fatalf("missing content: %s", buf.String())
+	}
+}
+
+func TestCollectGeminiJSONThoughtOnly(t *testing.T) {
+	src := strings.NewReader("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"only thought\",\"thought\":true}]},\"finishReason\":\"STOP\"}]}}\n\n")
+	raw, err := CollectGeminiJSON(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, thinking, _, _, _ := collectParts(mustMap(raw))
+	if text != "only thought" {
+		t.Fatalf("text %q thinking %q from %s", text, thinking, raw)
+	}
+}
+
+func TestWriteOpenAISSEPromotesThoughtOnly(t *testing.T) {
+	src := strings.NewReader("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hidden\",\"thought\":true}]},\"finishReason\":\"STOP\"}]}}\n\n")
+	var buf bytes.Buffer
+	if _, err := WriteOpenAISSE(&buf, "gemini-3.7-flash", src); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `"content":"hidden"`) {
+		t.Fatalf("missing promoted content: %s", buf.String())
+	}
+}

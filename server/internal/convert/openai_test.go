@@ -34,3 +34,134 @@ func TestOpenAIToGeminiBasic(t *testing.T) {
 		t.Fatal("missing systemInstruction")
 	}
 }
+
+func TestWrapThinkingLeavesRoomForAnswer(t *testing.T) {
+	req := OpenAIRequest{
+		Model: "gemini-3.7-flash",
+		Messages: []OpenAIMessage{
+			{Role: "user", Content: "hello"},
+		},
+	}
+	outer, _, _ := OpenAIToGemini(req, "proj-1", "a@gmail.com", "acc-1")
+	inner, _ := outer.Request.(InnerRequest)
+	gc := AsMap(inner.GenerationConfig)
+	if gc == nil {
+		t.Fatal("missing generationConfig")
+	}
+	tc := AsMap(gc["thinkingConfig"])
+	if tc == nil {
+		t.Fatal("missing thinkingConfig")
+	}
+	budget := intVal(tc["thinkingBudget"])
+	maxTok := intVal(gc["maxOutputTokens"])
+	if budget <= 0 {
+		t.Fatalf("budget %d", budget)
+	}
+	if maxTok <= budget {
+		t.Fatalf("maxOutputTokens %d must be > thinkingBudget %d", maxTok, budget)
+	}
+}
+
+func TestFlashFunctionCallGetsThoughtSignature(t *testing.T) {
+	req := OpenAIRequest{
+		Model: "gemini-3.7-flash",
+		Messages: []OpenAIMessage{
+			{Role: "user", Content: "search"},
+			{
+				Role:    "assistant",
+				Content: "",
+				ToolCalls: []any{map[string]any{
+					"id":   "call_1",
+					"type": "function",
+					"function": map[string]any{
+						"name":      "web_search",
+						"arguments": `{"q":"hi"}`,
+					},
+				}},
+			},
+			{Role: "tool", Name: "web_search", ToolCallID: "call_1", Content: "ok"},
+		},
+	}
+	outer, _, _ := OpenAIToGemini(req, "proj-1", "a@gmail.com", "acc-1")
+	inner, _ := outer.Request.(InnerRequest)
+	found := false
+	for _, item := range AsSlice(inner.Contents) {
+		msg := AsMap(item)
+		for _, p := range AsSlice(msg["parts"]) {
+			part := AsMap(p)
+			if AsMap(part["functionCall"]) == nil {
+				continue
+			}
+			if AsString(part["thoughtSignature"]) != "skip_thought_signature_validator" {
+				t.Fatalf("signature %#v", part["thoughtSignature"])
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing functionCall signature")
+	}
+}
+
+func TestNativeFlashDoesNotAutoInjectThinking(t *testing.T) {
+	outer, mapped, _ := NativeGeminiToInternal(map[string]any{
+		"contents": []any{map[string]any{"parts": []any{map[string]any{"text": "hi"}}}},
+	}, "gemini-3.7-flash", "proj", "a@gmail.com", "acc")
+	if mapped != "gemini-3.7-flash" {
+		t.Fatalf("mapped %s", mapped)
+	}
+	inner, _ := outer.Request.(InnerRequest)
+	gc := AsMap(inner.GenerationConfig)
+	if AsMap(gc["thinkingConfig"]) != nil {
+		t.Fatalf("flash native should not auto-inject thinkingConfig: %#v", gc)
+	}
+	contents := AsSlice(inner.Contents)
+	if AsString(AsMap(contents[0])["role"]) != "user" {
+		t.Fatalf("missing role %#v", contents[0])
+	}
+}
+
+func TestAssistantHistoryGetsThoughtBlock(t *testing.T) {
+	req := OpenAIRequest{
+		Model: "gemini-3.7-flash",
+		Messages: []OpenAIMessage{
+			{Role: "user", Content: "hi"},
+			{Role: "assistant", Content: "hello"},
+			{Role: "user", Content: "again"},
+		},
+	}
+	outer, _, _ := OpenAIToGemini(req, "proj", "a@gmail.com", "acc")
+	inner, _ := outer.Request.(InnerRequest)
+	found := false
+	for _, item := range AsSlice(inner.Contents) {
+		msg := AsMap(item)
+		if AsString(msg["role"]) != "model" {
+			continue
+		}
+		parts := AsSlice(msg["parts"])
+		if len(parts) == 0 {
+			t.Fatal("empty model parts")
+		}
+		if !partIsThought(AsMap(parts[0])) {
+			t.Fatalf("first part should be thought %#v", parts[0])
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("missing model message")
+	}
+}
+
+func TestGeminiToOpenAIPromotesThoughtOnly(t *testing.T) {
+	raw := []byte(`{"candidates":[{"content":{"parts":[{"text":"secret answer","thought":true}]},"finishReason":"STOP"}]}`)
+	out, err := GeminiToOpenAI("gemini-3.7-flash", raw, "chatcmpl-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := mustMap(out)
+	choices := AsSlice(payload["choices"])
+	msg := AsMap(AsMap(choices[0])["message"])
+	if AsString(msg["content"]) != "secret answer" {
+		t.Fatalf("content %#v", msg["content"])
+	}
+}

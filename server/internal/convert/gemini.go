@@ -29,7 +29,7 @@ func NativeGeminiToInternal(body map[string]any, model, projectID, email, accoun
 	if inner.GenerationConfig == nil {
 		inner.GenerationConfig = map[string]any{}
 	}
-	if IsThinkingModel(mapped) && !IsImageModel(mapped) {
+	if shouldAutoInjectThinking(mapped) {
 		gc := AsMap(inner.GenerationConfig)
 		if gc == nil {
 			gc = map[string]any{}

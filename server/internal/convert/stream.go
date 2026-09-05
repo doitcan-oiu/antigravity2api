@@ -35,7 +35,12 @@ func WriteOpenAISSE(dst io.Writer, model string, src io.Reader) (StreamStats, er
 	reader := bufio.NewReader(src)
 	var buf bytes.Buffer
 	sentRole := false
+	sentText := false
 	toolIndex := 0
+	var thoughtAcc strings.Builder
+	emit := func(payload map[string]any) {
+		_ = writeSSE(dst, payload)
+	}
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && err != io.EOF {
@@ -43,7 +48,7 @@ func WriteOpenAISSE(dst io.Writer, model string, src io.Reader) (StreamStats, er
 		}
 		buf.WriteString(line)
 		for {
-			chunk, _, ok := takeSSE(&buf)
+			chunk, _, ok := nextSSE(&buf, err == io.EOF)
 			if !ok {
 				break
 			}
@@ -57,20 +62,22 @@ func WriteOpenAISSE(dst io.Writer, model string, src io.Reader) (StreamStats, er
 			text, thinking, toolCalls, finish, usage := collectParts(payload)
 			stats.note(text, thinking, toolCalls, usage)
 			if !sentRole {
-				_ = writeSSE(dst, map[string]any{
+				emit(map[string]any{
 					"id": id, "object": "chat.completion.chunk", "created": nowUnix(), "model": model,
 					"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant"}, "finish_reason": nil}},
 				})
 				sentRole = true
 			}
 			if thinking != "" {
-				_ = writeSSE(dst, map[string]any{
+				thoughtAcc.WriteString(thinking)
+				emit(map[string]any{
 					"id": id, "object": "chat.completion.chunk", "created": nowUnix(), "model": model,
 					"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": nil, "reasoning_content": thinking}, "finish_reason": nil}},
 				})
 			}
 			if text != "" {
-				_ = writeSSE(dst, map[string]any{
+				sentText = true
+				emit(map[string]any{
 					"id": id, "object": "chat.completion.chunk", "created": nowUnix(), "model": model,
 					"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": text}, "finish_reason": nil}},
 				})
@@ -96,6 +103,13 @@ func WriteOpenAISSE(dst io.Writer, model string, src io.Reader) (StreamStats, er
 				})
 			}
 			if finish != "" {
+				if !sentText && thoughtAcc.Len() > 0 && toolIndex == 0 {
+					sentText = true
+					emit(map[string]any{
+						"id": id, "object": "chat.completion.chunk", "created": nowUnix(), "model": model,
+						"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": thoughtAcc.String()}, "finish_reason": nil}},
+					})
+				}
 				out := map[string]any{
 					"id": id, "object": "chat.completion.chunk", "created": nowUnix(), "model": model,
 					"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": openaiFinish(finish, toolIndex > 0)}},
@@ -103,12 +117,24 @@ func WriteOpenAISSE(dst io.Writer, model string, src io.Reader) (StreamStats, er
 				if usage != nil {
 					out["usage"] = usage
 				}
-				_ = writeSSE(dst, out)
+				emit(out)
 			}
 		}
 		if err == io.EOF {
 			break
 		}
+	}
+	if !sentText && thoughtAcc.Len() > 0 && toolIndex == 0 {
+		if !sentRole {
+			_ = writeSSE(dst, map[string]any{
+				"id": id, "object": "chat.completion.chunk", "created": nowUnix(), "model": model,
+				"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant"}, "finish_reason": nil}},
+			})
+		}
+		_ = writeSSE(dst, map[string]any{
+			"id": id, "object": "chat.completion.chunk", "created": nowUnix(), "model": model,
+			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": thoughtAcc.String()}, "finish_reason": nil}},
+		})
 	}
 	_, _ = io.WriteString(dst, "data: [DONE]\n\n")
 	return stats, nil
@@ -123,6 +149,7 @@ func WriteClaudeSSE(dst io.Writer, model string, src io.Reader) (StreamStats, er
 	started := false
 	textOpen := false
 	thinkOpen := false
+	var thoughtAcc strings.Builder
 	writeEvent := func(event string, payload any) {
 		b, _ := json.Marshal(payload)
 		fmt.Fprintf(dst, "event: %s\ndata: %s\n\n", event, b)
@@ -134,7 +161,7 @@ func WriteClaudeSSE(dst io.Writer, model string, src io.Reader) (StreamStats, er
 		}
 		buf.WriteString(line)
 		for {
-			chunk, _, ok := takeSSE(&buf)
+			chunk, _, ok := nextSSE(&buf, err == io.EOF)
 			if !ok {
 				break
 			}
@@ -158,6 +185,7 @@ func WriteClaudeSSE(dst io.Writer, model string, src io.Reader) (StreamStats, er
 			text, thinking, toolCalls, finish, usage := collectParts(payload)
 			stats.note(text, thinking, toolCalls, usage)
 			if thinking != "" {
+				thoughtAcc.WriteString(thinking)
 				if !thinkOpen {
 					writeEvent("content_block_start", map[string]any{
 						"type": "content_block_start", "index": index,
@@ -215,6 +243,22 @@ func WriteClaudeSSE(dst io.Writer, model string, src io.Reader) (StreamStats, er
 				index++
 			}
 			if finish != "" {
+				if !textOpen && thoughtAcc.Len() > 0 && len(toolCalls) == 0 {
+					if thinkOpen {
+						writeEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": index})
+						thinkOpen = false
+						index++
+					}
+					writeEvent("content_block_start", map[string]any{
+						"type": "content_block_start", "index": index,
+						"content_block": map[string]any{"type": "text", "text": ""},
+					})
+					writeEvent("content_block_delta", map[string]any{
+						"type": "content_block_delta", "index": index,
+						"delta": map[string]any{"type": "text_delta", "text": thoughtAcc.String()},
+					})
+					textOpen = true
+				}
 				if thinkOpen {
 					writeEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": index})
 					thinkOpen = false
@@ -273,7 +317,7 @@ func WriteGeminiSSE(dst io.Writer, model string, src io.Reader) (StreamStats, er
 		}
 		buf.WriteString(line)
 		for {
-			chunk, _, ok := takeSSE(&buf)
+			chunk, _, ok := nextSSE(&buf, err == io.EOF)
 			if !ok {
 				break
 			}
@@ -298,24 +342,69 @@ func WriteGeminiSSE(dst io.Writer, model string, src io.Reader) (StreamStats, er
 }
 
 func takeSSE(buf *bytes.Buffer) (string, []byte, bool) {
-	data := buf.Bytes()
-	idx := bytes.Index(data, []byte("\n\n"))
-	if idx < 0 {
-		idx = bytes.Index(data, []byte("\r\n\r\n"))
-		if idx < 0 {
-			return "", nil, false
+	return nextSSE(buf, false)
+}
+
+func nextSSE(buf *bytes.Buffer, flush bool) (string, []byte, bool) {
+	for buf.Len() > 0 {
+		data := buf.Bytes()
+		if idx := bytes.Index(data, []byte("\n\n")); idx >= 0 {
+			block := string(data[:idx])
+			rest := append([]byte(nil), data[idx+2:]...)
+			buf.Reset()
+			buf.Write(rest)
+			if payload := extractData(block); payload != "" {
+				return payload, rest, true
+			}
+			continue
 		}
-		block := string(data[:idx])
-		rest := append([]byte(nil), data[idx+4:]...)
+		if idx := bytes.Index(data, []byte("\r\n\r\n")); idx >= 0 {
+			block := string(data[:idx])
+			rest := append([]byte(nil), data[idx+4:]...)
+			buf.Reset()
+			buf.Write(rest)
+			if payload := extractData(block); payload != "" {
+				return payload, rest, true
+			}
+			continue
+		}
+		nl := bytes.IndexByte(data, '\n')
+		if nl < 0 {
+			break
+		}
+		line := bytes.TrimRight(data[:nl], "\r")
+		rest := append([]byte(nil), data[nl+1:]...)
 		buf.Reset()
 		buf.Write(rest)
-		return extractData(block), rest, true
+		trim := bytes.TrimSpace(line)
+		if len(trim) == 0 {
+			continue
+		}
+		if bytes.HasPrefix(trim, []byte("data:")) {
+			payload := string(bytes.TrimSpace(bytes.TrimPrefix(trim, []byte("data:"))))
+			if payload != "" {
+				return payload, rest, true
+			}
+		}
 	}
-	block := string(data[:idx])
-	rest := append([]byte(nil), data[idx+2:]...)
+	if !flush || buf.Len() == 0 {
+		return "", nil, false
+	}
+	raw := strings.TrimSpace(buf.String())
 	buf.Reset()
-	buf.Write(rest)
-	return extractData(block), rest, true
+	if raw == "" {
+		return "", nil, false
+	}
+	if payload := extractData(raw); payload != "" {
+		return payload, nil, true
+	}
+	if strings.HasPrefix(raw, "data:") {
+		return strings.TrimSpace(strings.TrimPrefix(raw, "data:")), nil, true
+	}
+	if json.Valid([]byte(raw)) {
+		return raw, nil, true
+	}
+	return "", nil, false
 }
 
 func extractData(block string) string {
@@ -345,6 +434,34 @@ func parseGeminiChunk(chunk string) (map[string]any, bool) {
 		return r, true
 	}
 	return envelope, true
+}
+
+func revealThoughtOnlyParts(parts []any) []any {
+	hasVisible := false
+	for _, p := range parts {
+		part := AsMap(p)
+		if part == nil {
+			continue
+		}
+		if AsMap(part["functionCall"]) != nil || AsMap(part["inlineData"]) != nil {
+			hasVisible = true
+			break
+		}
+		if AsString(part["text"]) != "" && !partIsThought(part) {
+			hasVisible = true
+			break
+		}
+	}
+	if hasVisible {
+		return parts
+	}
+	for _, p := range parts {
+		part := AsMap(p)
+		if part != nil && AsString(part["text"]) != "" {
+			delete(part, "thought")
+		}
+	}
+	return parts
 }
 
 func writeSSE(w io.Writer, payload any) error {
@@ -378,7 +495,7 @@ func CollectGeminiJSON(src io.Reader) ([]byte, error) {
 			leftover.WriteString(line)
 		}
 		for {
-			chunk, _, ok := takeSSE(&buf)
+			chunk, _, ok := nextSSE(&buf, err == io.EOF)
 			if !ok {
 				break
 			}
@@ -412,11 +529,11 @@ func CollectGeminiJSON(src io.Reader) ([]byte, error) {
 				}
 				text := AsString(part["text"])
 				if text != "" && part["functionCall"] == nil {
-					thought, _ := part["thought"].(bool)
+					thought := partIsThought(part)
 					if len(parts) > 0 {
 						last := AsMap(parts[len(parts)-1])
 						if last != nil && last["functionCall"] == nil && AsString(last["text"]) != "" {
-							lastThought, _ := last["thought"].(bool)
+							lastThought := partIsThought(last)
 							if lastThought == thought {
 								last["text"] = AsString(last["text"]) + text
 								parts[len(parts)-1] = last
@@ -445,6 +562,7 @@ func CollectGeminiJSON(src io.Reader) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("invalid upstream stream")
 	}
+	parts = revealThoughtOnlyParts(parts)
 	out := map[string]any{
 		"candidates": []any{map[string]any{
 			"content": map[string]any{
