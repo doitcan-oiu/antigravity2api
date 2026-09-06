@@ -1,4 +1,4 @@
-import { ExternalLink, Github } from "lucide-react";
+import { ExternalLink, FolderGit2 } from "lucide-react";
 import { PageHeader } from "../components/StatusChip";
 import { APP_NAME, APP_REPO, APP_VERSION } from "../lib/app";
 
@@ -41,7 +41,7 @@ export default function About() {
           ))}
         </div>
         <a className="btn btn-primary about-github" href={APP_REPO} target="_blank" rel="noreferrer">
-          <Github size={16} />
+          <FolderGit2 size={16} />
           打开 GitHub
         </a>
       </section>
