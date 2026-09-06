@@ -84,25 +84,26 @@ export default function AccountDetail({ account, onClose }: { account: Account; 
           <h3>周限与滚动</h3>
           {account.quota?.is_forbidden ? (
             <p className="muted">配额不可用</p>
-          ) : groups.length === 0 ? (
-            <p className="muted">暂无周限数据，先刷新该账号额度。</p>
           ) : (
             <div className="acct-qgroups">
               {groups.map((g) => (
                 <div className="acct-qgroup" key={g.name}>
                   <div className="acct-qgroup-name">{g.name}</div>
-                  {g.rows.map((row) => (
-                    <div className="acct-qrow" key={row.window}>
-                      <span className="acct-qwin">{row.label}</span>
-                      <div className="bar">
-                        <span style={{ width: `${Math.max(0, Math.min(100, row.percent))}%` }} />
+                  {g.rows.map((row) => {
+                    const empty = row.percent == null;
+                    return (
+                      <div className="acct-qrow" key={row.window}>
+                        <span className="acct-qwin">{row.label}</span>
+                        <div className="bar">
+                          <span style={{ width: empty ? "0%" : `${Math.max(0, Math.min(100, row.percent || 0))}%` }} />
+                        </div>
+                        <span className="acct-qpct">{empty ? "—" : `${row.percent}%`}</span>
+                        <span className="acct-qreset" title={row.reset ? fmtReset(row.reset) : ""}>
+                          {row.reset ? fmtResetRemain(row.reset) : "—"}
+                        </span>
                       </div>
-                      <span className="acct-qpct">{row.percent}%</span>
-                      <span className="acct-qreset" title={row.reset ? fmtReset(row.reset) : ""}>
-                        {row.reset ? fmtResetRemain(row.reset) : "—"}
-                      </span>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ))}
             </div>

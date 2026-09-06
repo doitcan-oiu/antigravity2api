@@ -179,7 +179,14 @@ func (p *Pool) RefreshAccount(id string) (*models.Account, error) {
 	if tier != "" {
 		acc.SubscriptionTier = tier
 	}
+	var prevGroups []models.QuotaGroup
+	if acc.Quota != nil {
+		prevGroups = acc.Quota.QuotaGroups
+	}
 	if q, err := p.cc.FetchQuota(acc.AccessToken, acc.ProjectID); err == nil {
+		if len(q.QuotaGroups) == 0 && len(prevGroups) > 0 && !q.IsForbidden {
+			q.QuotaGroups = prevGroups
+		}
 		acc.Quota = q
 		if q.SubscriptionTier != "" {
 			acc.SubscriptionTier = q.SubscriptionTier

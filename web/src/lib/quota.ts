@@ -18,6 +18,8 @@ const LABELS: Record<QuotaKind, string> = {
   claude: "Claude",
 };
 
+type Bucket = QuotaGroup["buckets"][number];
+
 function norm(s: string) {
   return s.trim().toLowerCase();
 }
@@ -43,33 +45,70 @@ const PREFERRED: Record<QuotaKind, string[]> = {
   claude: ["claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-sonnet-4-5"],
 };
 
+function groupText(group: QuotaGroup) {
+  const bucketIds = (group.buckets || []).map((b) => b.bucket_id || "").join(" ");
+  return norm(`${group.display_name || ""} ${group.description || ""} ${bucketIds}`);
+}
+
 function findGroup(groups: QuotaGroup[] | undefined, kind: QuotaKind): QuotaGroup | null {
   if (!groups?.length) return null;
   for (const g of groups) {
-    const name = norm(g.display_name || "");
+    const name = groupText(g);
     if (kind === "oss" || kind === "claude") {
-      if (name.includes("gemini")) continue;
+      if (name.includes("gemini") && !name.includes("claude") && !name.includes("gpt") && !name.includes("oss") && !name.includes("3p")) continue;
       if (name.includes("claude") || name.includes("gpt") || name.includes("oss") || name.includes("3p")) return g;
       continue;
     }
-    if (name.includes("claude") || name.includes("gpt")) continue;
+    if (name.includes("claude") || name.includes("gpt") || name.includes("3p")) continue;
     if (name.includes("gemini")) return g;
   }
   return null;
 }
 
-function bucketKey(bucket: QuotaGroup["buckets"][number]) {
-  return `${bucket.window || ""} ${bucket.bucket_id || ""} ${bucket.display_name || ""}`.toLowerCase();
+function isWeeklyText(text: string) {
+  return /week|weekly|\b7d\b|7-day|7day/.test(text);
+}
+
+function isRollingText(text: string) {
+  return /\b5h\b|5-h\b|5-hour|five\s*hour|\b5hr\b|\bhour|\bhours\b/.test(text);
+}
+
+function hoursUntil(reset?: string) {
+  if (!reset) return null;
+  const t = Date.parse(reset);
+  if (Number.isNaN(t)) return null;
+  return (t - Date.now()) / 3_600_000;
+}
+
+function classifyBucket(bucket: Bucket, siblings: Bucket[]): QuotaWindow | null {
+  const window = norm(bucket.window || "");
+  const id = norm(bucket.bucket_id || "");
+  const name = norm(bucket.display_name || "");
+  const key = `${window} ${id} ${name}`.trim();
+
+  if (isWeeklyText(key) && !isRollingText(window) && !isRollingText(id)) return "weekly";
+  if (isRollingText(window) || isRollingText(id) || (isRollingText(name) && !isWeeklyText(name))) return "5h";
+  if (isWeeklyText(key)) return "weekly";
+
+  const hours = hoursUntil(bucket.reset_time);
+  if (hours != null && hours > 6) return "weekly";
+  if (hours != null && hours >= 0 && hours <= 6) return "5h";
+
+  if (siblings.length === 2) {
+    const other = siblings.find((item) => item !== bucket);
+    const a = Date.parse(bucket.reset_time || "");
+    const b = Date.parse(other?.reset_time || "");
+    if (!Number.isNaN(a) && !Number.isNaN(b) && a !== b) {
+      return a > b ? "weekly" : "5h";
+    }
+  }
+  return null;
 }
 
 function pickBucket(group: QuotaGroup | null, window: QuotaWindow) {
   if (!group?.buckets?.length) return null;
   for (const bucket of group.buckets) {
-    const key = bucketKey(bucket);
-    if (window === "weekly" && key.includes("week")) return bucket;
-    if (window === "5h" && (key.includes("5h") || key.includes("hour") || key.includes("5-hour") || key.includes("five hour"))) {
-      return bucket;
-    }
+    if (classifyBucket(bucket, group.buckets) === window) return bucket;
   }
   return null;
 }
@@ -78,11 +117,15 @@ function pct(fraction: number | undefined | null) {
   return Math.round((fraction || 0) * 100);
 }
 
-function meterFor(account: Account, kind: QuotaKind): QuotaMeter {
+function modelQuota(account: Account, kind: QuotaKind) {
   const models = account.quota?.models || [];
   let found = PREFERRED[kind].map((id) => models.find((m) => norm(m.name) === id)).find(Boolean);
   if (!found) found = models.find((m) => kindOf(m.name, m.display_name) === kind);
+  return found;
+}
 
+function meterFor(account: Account, kind: QuotaKind): QuotaMeter {
+  const found = modelQuota(account, kind);
   const group = findGroup(account.quota?.quota_groups, kind);
   const weekly = pickBucket(group, "weekly");
   const rolling = pickBucket(group, "5h");
@@ -119,12 +162,29 @@ function meterFor(account: Account, kind: QuotaKind): QuotaMeter {
     };
   }
 
+  const inferred = inferWindow(found?.reset_time);
   return {
     kind,
     label: LABELS[kind],
     percent: fiveHourPercent,
     reset: fiveHourReset,
-    window: fiveHourPercent == null ? undefined : "5h",
+    window: fiveHourPercent == null ? undefined : inferred || "5h",
+  };
+}
+
+function inferWindow(reset?: string): QuotaWindow | undefined {
+  const hours = hoursUntil(reset);
+  if (hours == null) return undefined;
+  if (hours > 6) return "weekly";
+  return "5h";
+}
+
+function fakeBucket(percent: number, reset?: string): Bucket {
+  return {
+    bucket_id: "",
+    window: "",
+    remaining_fraction: percent / 100,
+    reset_time: reset,
   };
 }
 
@@ -162,7 +222,7 @@ export function windowLabel(window?: QuotaWindow) {
 export type QuotaWindowRow = {
   label: string;
   window: QuotaWindow;
-  percent: number;
+  percent: number | null;
   reset?: string;
 };
 
@@ -174,20 +234,30 @@ export type QuotaGroupView = {
 export function quotaGroups(account: Account): QuotaGroupView[] {
   return (["oss", "gemini-pro", "gemini-flash", "claude"] as QuotaKind[]).map((kind) => {
     const group = findGroup(account.quota?.quota_groups, kind);
-    const weekly = pickBucket(group, "weekly");
-    const rolling = pickBucket(group, "5h");
+    let weekly = pickBucket(group, "weekly");
+    let rolling = pickBucket(group, "5h");
+    const found = modelQuota(account, kind);
     const meter = meterFor(account, kind);
-    const rows: QuotaWindowRow[] = [];
-    if (weekly) {
-      rows.push({ label: "周限", window: "weekly", percent: pct(weekly.remaining_fraction), reset: weekly.reset_time });
+
+    if (!weekly && meter.window === "weekly" && meter.percent != null) {
+      weekly = fakeBucket(meter.percent, meter.reset);
     }
-    if (rolling) {
-      rows.push({ label: "滚动", window: "5h", percent: pct(rolling.remaining_fraction), reset: rolling.reset_time });
-    } else if (meter.percent != null && meter.window === "5h") {
-      rows.push({ label: "滚动", window: "5h", percent: meter.percent, reset: meter.reset });
-    } else if (!weekly && meter.percent != null) {
-      rows.push({ label: meter.window === "weekly" ? "周限" : "滚动", window: meter.window || "5h", percent: meter.percent, reset: meter.reset });
+    if (!weekly && found && inferWindow(found.reset_time) === "weekly") {
+      weekly = fakeBucket(found.percentage, found.reset_time);
     }
-    return { name: LABELS[kind], rows };
-  }).filter((g) => g.rows.length > 0);
+    if (!rolling && meter.window === "5h" && meter.percent != null) {
+      rolling = fakeBucket(meter.percent, meter.reset);
+    }
+    if (!rolling && found && inferWindow(found.reset_time) === "5h") {
+      rolling = fakeBucket(found.percentage, found.reset_time);
+    }
+
+    return {
+      name: LABELS[kind],
+      rows: [
+        { label: "周限", window: "weekly", percent: weekly ? pct(weekly.remaining_fraction) : null, reset: weekly?.reset_time },
+        { label: "滚动", window: "5h", percent: rolling ? pct(rolling.remaining_fraction) : null, reset: rolling?.reset_time },
+      ],
+    };
+  });
 }

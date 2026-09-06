@@ -122,3 +122,72 @@ func TestNoLenReaderType(t *testing.T) {
 		t.Fatal("should be named type")
 	}
 }
+
+func TestParseQuotaSummary(t *testing.T) {
+	raw := []byte(`{
+	  "groups": [
+	    {
+	      "displayName": "Gemini Models",
+	      "description": "Models within this group: Gemini Flash, Gemini Pro",
+	      "buckets": [
+	        {
+	          "bucketId": "gemini-weekly",
+	          "window": "weekly",
+	          "remainingFraction": 0.62,
+	          "resetTime": "2026-09-10T18:25:10Z",
+	          "displayName": "Weekly Limit Remaining",
+	          "description": "You have used some of your weekly limit, it will fully refresh in 5 days, 22 hours."
+	        },
+	        {
+	          "bucketId": "gemini-5h",
+	          "window": "5h",
+	          "remainingFraction": "1",
+	          "resetTime": "2026-09-06T18:32:27Z",
+	          "displayName": "Five Hour Limit Remaining"
+	        }
+	      ]
+	    },
+	    {
+	      "displayName": "Claude and GPT models",
+	      "buckets": [
+	        {
+	          "bucketId": "3p-weekly",
+	          "window": "weekly",
+	          "remainingFraction": 0,
+	          "resetTime": "2026-09-08T06:53:00Z",
+	          "displayName": "Weekly Limit Remaining"
+	        },
+	        {
+	          "bucketId": "3p-5h",
+	          "window": "5h",
+	          "remainingFraction": {"value": 1},
+	          "resetTime": "2026-09-06T18:32:27Z",
+	          "displayName": "Five Hour Limit Remaining"
+	        }
+	      ]
+	    }
+	  ]
+	}`)
+	groups := parseQuotaSummary(raw)
+	if len(groups) != 2 {
+		t.Fatalf("groups=%d", len(groups))
+	}
+	if groups[0].Buckets[0].Window != "weekly" || groups[0].Buckets[0].RemainingFraction != 0.62 {
+		t.Fatalf("gemini weekly %+v", groups[0].Buckets[0])
+	}
+	if groups[0].Buckets[1].Window != "5h" || groups[0].Buckets[1].RemainingFraction != 1 {
+		t.Fatalf("gemini 5h %+v", groups[0].Buckets[1])
+	}
+	if groups[1].Buckets[0].RemainingFraction != 0 {
+		t.Fatalf("claude weekly %+v", groups[1].Buckets[0])
+	}
+	if groups[1].Buckets[1].RemainingFraction != 1 {
+		t.Fatalf("claude 5h %+v", groups[1].Buckets[1])
+	}
+
+	wrapped := []byte(`{"quotaGroups":[{"display_name":"Gemini Models","buckets":[{"bucket_id":"gemini-weekly","window":"weekly","remaining_fraction":0.5}]}]}`)
+	got := parseQuotaSummary(wrapped)
+	if len(got) != 1 || got[0].Buckets[0].BucketID != "gemini-weekly" || got[0].Buckets[0].RemainingFraction != 0.5 {
+		t.Fatalf("snake/camel fallback %+v", got)
+	}
+}

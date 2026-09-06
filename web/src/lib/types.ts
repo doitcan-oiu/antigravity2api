@@ -75,6 +75,7 @@ export type QuotaGroup = {
     remaining_fraction: number;
     reset_time?: string;
     display_name?: string;
+    description?: string;
   }[];
 };
 

@@ -263,51 +263,24 @@ func (c *Client) FetchQuota(accessToken, projectID string) (*models.QuotaData, e
 }
 
 func (c *Client) fetchQuotaSummary(accessToken, projectID string) []models.QuotaGroup {
-	payload := map[string]any{}
-	if projectID != "" {
-		payload["project"] = projectID
-	}
-	resp, data, err := c.doJSON(nil, "retrieveUserQuotaSummary", accessToken, payload, "")
-	if err != nil || resp.StatusCode >= 400 {
-		return nil
-	}
-	var parsed struct {
-		Groups []struct {
-			DisplayName string `json:"displayName"`
-			Description string `json:"description"`
-			Buckets     []struct {
-				BucketID          string   `json:"bucketId"`
-				Window            string   `json:"window"`
-				RemainingFraction *float64 `json:"remainingFraction"`
-				ResetTime         string   `json:"resetTime"`
-				DisplayName       string   `json:"displayName"`
-				Description       string   `json:"description"`
-			} `json:"buckets"`
-		} `json:"groups"`
-	}
-	if json.Unmarshal(data, &parsed) != nil {
-		return nil
-	}
-	out := make([]models.QuotaGroup, 0, len(parsed.Groups))
-	for _, g := range parsed.Groups {
-		group := models.QuotaGroup{DisplayName: g.DisplayName, Description: g.Description}
-		for _, b := range g.Buckets {
-			frac := 0.0
-			if b.RemainingFraction != nil {
-				frac = *b.RemainingFraction
-			}
-			group.Buckets = append(group.Buckets, models.QuotaBucket{
-				BucketID:          b.BucketID,
-				Window:            b.Window,
-				RemainingFraction: frac,
-				ResetTime:         b.ResetTime,
-				DisplayName:       b.DisplayName,
-				Description:       b.Description,
-			})
+	try := func(pid string) []models.QuotaGroup {
+		payload := map[string]any{}
+		if pid != "" {
+			payload["project"] = pid
 		}
-		out = append(out, group)
+		resp, data, err := c.doJSON(nil, "retrieveUserQuotaSummary", accessToken, payload, "")
+		if err != nil || resp.StatusCode >= 400 {
+			return nil
+		}
+		return parseQuotaSummary(data)
 	}
-	return out
+	if groups := try(projectID); len(groups) > 0 {
+		return groups
+	}
+	if projectID != "" {
+		return try("")
+	}
+	return nil
 }
 
 func (c *Client) Generate(ctx context.Context, accessToken string, payload any, stream bool) (*http.Response, []byte, error) {

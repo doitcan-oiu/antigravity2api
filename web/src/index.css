@@ -923,16 +923,16 @@ button, input, textarea, select { font-family: inherit; }
   border-radius: 12px;
   padding: 12px 14px;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 .acct-qgroup-name {
   font-size: 13px;
   font-weight: 600;
-  margin-bottom: 10px;
+  margin-bottom: 4px;
 }
 .acct-qrow {
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) 44px;
+  grid-template-columns: 40px minmax(0, 1fr) 48px;
   grid-template-areas:
     "win bar pct"
     ". reset reset";
@@ -942,6 +942,11 @@ button, input, textarea, select { font-family: inherit; }
   margin-top: 8px;
   font-size: 12px;
   min-width: 0;
+}
+.acct-qrow + .acct-qrow {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline);
 }
 .acct-qwin { grid-area: win; color: var(--steel); font-weight: 600; }
 .acct-qrow .bar {
