@@ -44,6 +44,23 @@ var modelMap = map[string]string{
 	"gemini-3.1-pro":             "gemini-3.1-pro-preview",
 	"gemini-3.1-pro-preview":     "gemini-3.1-pro-preview",
 	"gemini-3-pro-image":         "gemini-3-pro-image",
+	"gpt-4-turbo-preview":        "gemini-2.5-flash",
+	"gpt-4-0125-preview":         "gemini-2.5-flash",
+	"gpt-4-1106-preview":         "gemini-2.5-flash",
+	"gpt-4-0613":                 "gemini-2.5-flash",
+	"gpt-4o-2024-05-13":          "gemini-2.5-flash",
+	"gpt-4o-2024-08-06":          "gemini-2.5-flash",
+	"gpt-4o-mini-2024-07-18":     "gemini-2.5-flash",
+	"claude-sonnet-4-5-20250929": "claude-sonnet-4-6-thinking",
+	"claude-3-5-sonnet-20240620": "claude-sonnet-4-6",
+	"claude-opus-4-5-20251101":   "claude-opus-4-6-thinking",
+	"claude-opus-4-6-20260201":   "claude-opus-4-6-thinking",
+	"claude-opus-4.6":            "claude-opus-4-6-thinking",
+	"claude-opus-4.6-thinking":   "claude-opus-4-6-thinking",
+	"claude-3-haiku-20240307":    "claude-sonnet-4-6",
+	"claude-haiku-4-5-20251001":  "claude-sonnet-4-6",
+	"gemini-3-flash-preview":     "gemini-3-flash",
+	"gemini-3-pro-image-preview": "gemini-3-pro-image",
 }
 
 func MapModel(input string) string {
@@ -222,10 +239,10 @@ func contains(list []string, v string) bool {
 
 func IsThinkingModel(model string) bool {
 	m := strings.ToLower(model)
-	if strings.Contains(m, "claude") && strings.Contains(m, "thinking") {
+	if strings.Contains(m, "claude") && (strings.Contains(m, "thinking") || strings.Contains(m, "sonnet-4-6")) {
 		return true
 	}
-	if !strings.Contains(m, "gemini") {
+	if !strings.Contains(m, "gemini") || IsImageModel(m) || strings.Contains(m, "flash-lite") {
 		return false
 	}
 	return strings.Contains(m, "thinking") ||
@@ -239,6 +256,23 @@ func IsImageModel(model string) bool {
 
 func DefaultThinkingBudget(model string) int {
 	m := strings.ToLower(model)
+	switch m {
+	case "gemini-3.7-flash-low", "gemini-3.5-flash-extra-low":
+		return 1000
+	case "gemini-3.7-flash-medium", "gemini-3.5-flash-low":
+		return 4000
+	case "gemini-3.7-flash-high", "gemini-3-flash-agent":
+		return 10000
+	case "gemini-3.1-pro-low", "gemini-3-pro-low":
+		return 1001
+	case "gemini-pro-agent":
+		return 10001
+	case "claude-sonnet-4-6":
+		return 1024
+	}
+	if strings.Contains(m, "flash-lite") {
+		return 0
+	}
 	if strings.Contains(m, "claude-opus-4-6") {
 		return 24576
 	}
@@ -253,6 +287,15 @@ func DefaultThinkingBudget(model string) int {
 
 func MaxOutputTokens(model string) int {
 	m := strings.ToLower(model)
+	if strings.Contains(m, "flash-lite") {
+		return 16384
+	}
+	if strings.Contains(m, "opus-4-6") {
+		return 57344
+	}
+	if m == "gemini-pro-agent" || m == "gemini-3.1-pro-low" {
+		return 65535
+	}
 	if strings.Contains(m, "claude") {
 		return 64000
 	}

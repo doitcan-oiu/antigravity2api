@@ -15,6 +15,7 @@ export function StatusChip({ status }: { status: string }) {
     active: { cls: "badge-success", label: "可用" },
     expired: { cls: "badge-ink", label: "已过期" },
     disabled: { cls: "badge-line", label: "已停用" },
+    forbidden: { cls: "badge-ink", label: "访问受限" },
     rate_limited: { cls: "badge-beta", label: "限流中" },
   };
   const item = map[status] || { cls: "badge-line", label: status };

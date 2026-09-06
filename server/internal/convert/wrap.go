@@ -3,6 +3,7 @@ package convert
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -11,13 +12,39 @@ import (
 )
 
 type InnerRequest struct {
-	SystemInstruction any `json:"systemInstruction,omitempty"`
-	Tools             any `json:"tools,omitempty"`
-	ToolConfig        any `json:"toolConfig,omitempty"`
-	GenerationConfig  any `json:"generationConfig,omitempty"`
-	SafetySettings    any `json:"safetySettings,omitempty"`
-	SessionID         any `json:"sessionId,omitempty"`
-	Contents          any `json:"contents"`
+	SystemInstruction any            `json:"systemInstruction,omitempty"`
+	Tools             any            `json:"tools,omitempty"`
+	ToolConfig        any            `json:"toolConfig,omitempty"`
+	GenerationConfig  any            `json:"generationConfig,omitempty"`
+	SafetySettings    any            `json:"safetySettings,omitempty"`
+	SessionID         any            `json:"sessionId,omitempty"`
+	Contents          any            `json:"contents"`
+	Extra             map[string]any `json:"-"`
+}
+
+func (r InnerRequest) MarshalJSON() ([]byte, error) {
+	type plain InnerRequest
+	if len(r.Extra) == 0 {
+		return json.Marshal(plain(r))
+	}
+	raw, err := json.Marshal(plain(r))
+	if err != nil {
+		return nil, err
+	}
+	fields := map[string]json.RawMessage{}
+	if err = json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	for k, v := range r.Extra {
+		if _, known := fields[k]; !known {
+			encoded, err := json.Marshal(v)
+			if err != nil {
+				return nil, err
+			}
+			fields[k] = encoded
+		}
+	}
+	return json.Marshal(fields)
 }
 
 type OuterRequest struct {
@@ -48,7 +75,7 @@ func Wrap(projectID, model, email, sessionID string, inner InnerRequest, image b
 	if inner.SafetySettings == nil {
 		inner.SafetySettings = SafetyOff()
 	}
-	if sessionID != "" {
+	if AsString(inner.SessionID) == "" && sessionID != "" {
 		inner.SessionID = sessionID
 	}
 	normalizeInner(model, &inner, image)
@@ -86,8 +113,34 @@ func normalizeInner(model string, inner *InnerRequest, image bool) {
 	if inner == nil {
 		return
 	}
-	inner.GenerationConfig = normalizeGenerationConfig(model, inner.GenerationConfig, image)
-	inner.Contents = sanitizeContents(inner.Contents, model, thinkingConfigEnabled(inner.GenerationConfig) && !image)
+	inner.GenerationConfig = normalizeGenerationConfig(model, cloneValue(inner.GenerationConfig), image)
+	if image {
+		inner.Tools = nil
+		inner.ToolConfig = nil
+		inner.SystemInstruction = nil
+	}
+	// Claude function-call history requires a real signature; Gemini's sentinel
+	// cannot authenticate it. Keep the tool history and disable thinking for this
+	// request when the client did not preserve a recoverable signature.
+	if strings.Contains(strings.ToLower(model), "claude") && thinkingConfigEnabled(inner.GenerationConfig) {
+		missing := false
+		for _, v := range AsSlice(inner.Contents) {
+			m := AsMap(v)
+			for _, v := range AsSlice(m["parts"]) {
+				p := AsMap(v)
+				if p["functionCall"] != nil {
+					sig := thoughtSignature(p)
+					if sig == "" || sig == "skip_thought_signature_validator" {
+						missing = true
+					}
+				}
+			}
+		}
+		if missing {
+			AsMap(inner.GenerationConfig)["thinkingConfig"] = map[string]any{"includeThoughts": false, "thinkingBudget": 0}
+		}
+	}
+	inner.Contents = sanitizeContents(cloneValue(inner.Contents), model, thinkingConfigEnabled(inner.GenerationConfig) && !image)
 }
 
 func normalizeGenerationConfig(model string, gen any, image bool) map[string]any {
@@ -95,68 +148,52 @@ func normalizeGenerationConfig(model string, gen any, image bool) map[string]any
 	if gc == nil {
 		gc = map[string]any{}
 	}
-	lower := strings.ToLower(model)
-	isGemini := strings.Contains(lower, "gemini")
 	if image {
-		if tc := AsMap(gc["thinkingConfig"]); tc == nil {
-			gc["thinkingConfig"] = map[string]any{"includeThoughts": false}
-		}
 		delete(gc, "responseMimeType")
 		delete(gc, "responseModalities")
 		return gc
 	}
-	if isGemini {
-		if gc["topK"] == nil {
-			gc["topK"] = 40
-		}
-		if gc["topP"] == nil {
-			gc["topP"] = 1.0
-		}
+	if gc["topK"] == nil {
+		gc["topK"] = 40
+	}
+	if gc["topP"] == nil {
+		gc["topP"] = 1.0
+	}
+	maxTokens := intVal(gc["maxOutputTokens"])
+	modelMax := MaxOutputTokens(model)
+	if maxTokens <= 0 || maxTokens > modelMax {
+		maxTokens = modelMax
 	}
 	tc := AsMap(gc["thinkingConfig"])
-	if tc == nil {
-		return gc
-	}
-	if level := strings.ToUpper(AsString(tc["thinkingLevel"])); level != "" {
-		delete(tc, "thinkingLevel")
-		if tc["thinkingBudget"] == nil {
-			tc["thinkingBudget"] = thinkingBudgetFromLevel(model, level)
+	if tc != nil {
+		if level := AsString(tc["thinkingLevel"]); level != "" && !strings.Contains(strings.ToLower(model), "claude") {
+			delete(tc, "thinkingLevel")
+			if tc["thinkingBudget"] == nil {
+				tc["thinkingBudget"] = thinkingBudgetFromLevel(model, level)
+			}
 		}
-	}
-	budget := intVal(tc["thinkingBudget"])
-	capBudget := DefaultThinkingBudget(model)
-	if capBudget > 0 && budget > capBudget {
-		budget = capBudget
-		tc["thinkingBudget"] = budget
-	}
-	gc["thinkingConfig"] = tc
-	if budget <= 0 {
-		return gc
-	}
-	maxTok := intVal(gc["maxOutputTokens"])
-	modelMax := MaxOutputTokens(model)
-	need := budget + 8192
-	if need > modelMax {
-		need = modelMax
-	}
-	if maxTok <= 0 || maxTok <= budget {
-		maxTok = need
-	}
-	if maxTok > modelMax {
-		maxTok = modelMax
-	}
-	if maxTok <= budget {
-		budget = maxTok - 8192
-		if budget < 1024 {
-			budget = maxTok / 2
+		if _, hasBudget := tc["thinkingBudget"]; hasBudget {
+			budget := intVal(tc["thinkingBudget"])
+			capBudget := DefaultThinkingBudget(model)
+			// A client may choose a larger Sonnet budget than its conservative default.
+			if strings.Contains(strings.ToLower(model), "claude-sonnet") {
+				capBudget = 32768
+			}
+			if budget > capBudget && capBudget > 0 {
+				budget = capBudget
+			}
+			if budget >= maxTokens {
+				maxTokens = budget + 8192
+				if maxTokens > modelMax {
+					maxTokens = modelMax
+					budget = maxTokens - 8192
+				}
+			}
+			tc["thinkingBudget"] = budget
 		}
-		if budget < 0 {
-			budget = 0
-		}
-		tc["thinkingBudget"] = budget
 		gc["thinkingConfig"] = tc
 	}
-	gc["maxOutputTokens"] = maxTok
+	gc["maxOutputTokens"] = maxTokens
 	return gc
 }
 
@@ -202,34 +239,50 @@ func sanitizeContents(contents any, model string, thinking bool) any {
 		return contents
 	}
 	gemini := strings.Contains(strings.ToLower(model), "gemini")
-	for i, item := range items {
-		msg := AsMap(item)
+	var out []map[string]any
+	for _, v := range items {
+		msg := AsMap(v)
 		if msg == nil {
 			continue
 		}
-		if AsString(msg["role"]) == "" {
-			msg["role"] = "user"
-		}
 		role := strings.ToLower(AsString(msg["role"]))
-		parts := AsSlice(msg["parts"])
-		if thinking && gemini {
-			for _, p := range parts {
-				part := AsMap(p)
-				if part == nil {
-					continue
-				}
-				if AsMap(part["functionCall"]) != nil || partIsThought(part) {
-					ensureThoughtSignature(part)
+		if role == "" {
+			role = "user"
+		}
+		if role == "assistant" {
+			role = "model"
+		}
+		msg["role"] = role
+		var parts []any
+		for _, v := range AsSlice(msg["parts"]) {
+			p := AsMap(v)
+			if p == nil {
+				continue
+			}
+			sig := thoughtSignature(p)
+			if partIsThought(p) {
+				if !thinking || (!gemini && (sig == "" || sig == "skip_thought_signature_validator")) {
+					delete(p, "thought")
+					delete(p, "thoughtSignature")
+					delete(p, "thought_signature")
+				} else if gemini {
+					ensureThoughtSignature(p)
 				}
 			}
+			if AsMap(p["functionCall"]) != nil {
+				if gemini {
+					ensureThoughtSignature(p)
+				} else if sig == "skip_thought_signature_validator" {
+					delete(p, "thoughtSignature")
+					delete(p, "thought_signature")
+				}
+			}
+			parts = append(parts, p)
 		}
-		if thinking && (role == "model" || role == "assistant") {
-			parts = ensureLeadingThought(parts, gemini)
-			msg["parts"] = parts
-		}
-		items[i] = msg
+		msg["parts"] = parts
+		out = append(out, msg)
 	}
-	return items
+	return mergeContents(out)
 }
 
 func ensureThoughtSignature(part map[string]any) {
@@ -241,7 +294,7 @@ func ensureThoughtSignature(part map[string]any) {
 		sig = "skip_thought_signature_validator"
 	}
 	part["thoughtSignature"] = sig
-	part["thought_signature"] = sig
+	delete(part, "thought_signature")
 }
 
 func ensureLeadingThought(parts []any, gemini bool) []any {

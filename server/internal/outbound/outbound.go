@@ -54,38 +54,31 @@ func (m *Manager) Do(req *http.Request) (*http.Response, error) {
 	m.mu.RLock()
 	c := m.client
 	m.mu.RUnlock()
-	rr := c.R().SetContext(req.Context()).DisableAutoReadResponse()
-	for k, vs := range req.Header {
-		if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Transfer-Encoding") {
-			continue
-		}
-		if len(vs) == 0 {
-			continue
-		}
-		rr.SetHeader(k, vs[0])
-	}
-	if req.Body != nil {
-		rr.SetBody(req.Body)
-	}
-	resp, err := rr.Send(req.Method, req.URL.String())
-	if err != nil {
-		return nil, err
-	}
-	if resp == nil || resp.Response == nil {
-		return nil, fmt.Errorf("empty upstream response")
-	}
-	return resp.Response, nil
+	// The fingerprint and header ordering live in the transport. Preserve the
+	// original request's length, replay function and cancellation instead of
+	// re-wrapping its ReadCloser as an unknown-length req body.
+	return c.GetClient().Do(req)
 }
 
 func (m *Manager) Apply(enabled bool, raw string) error {
 	raw = Normalize(raw)
+	m.mu.RLock()
+	unchanged := m.client != nil && m.enabled == enabled && m.rawURL == raw
+	m.mu.RUnlock()
+	if unchanged {
+		return nil
+	}
 	if !enabled {
 		c := newChromeClient("")
 		m.mu.Lock()
+		old := m.client
 		m.client = c
 		m.enabled = false
 		m.rawURL = raw
 		m.mu.Unlock()
+		if old != nil {
+			old.GetTransport().CloseIdleConnections()
+		}
 		return nil
 	}
 	if raw == "" {
@@ -97,11 +90,24 @@ func (m *Manager) Apply(enabled bool, raw string) error {
 	}
 	c := newChromeClient(u.String())
 	m.mu.Lock()
+	old := m.client
 	m.client = c
 	m.enabled = true
 	m.rawURL = raw
 	m.mu.Unlock()
+	if old != nil {
+		old.GetTransport().CloseIdleConnections()
+	}
 	return nil
+}
+
+func (m *Manager) Close() {
+	m.mu.RLock()
+	c := m.client
+	m.mu.RUnlock()
+	if c != nil {
+		c.GetTransport().CloseIdleConnections()
+	}
 }
 
 func Normalize(raw string) string {
@@ -158,9 +164,10 @@ func newChromeClient(proxyRaw string) *req.Client {
 	tr := c.GetTransport()
 	tr.MaxIdleConns = 100
 	tr.MaxIdleConnsPerHost = 20
+	tr.MaxConnsPerHost = 128
 	tr.IdleConnTimeout = 90 * time.Second
 	tr.TLSHandshakeTimeout = 20 * time.Second
-	tr.ResponseHeaderTimeout = 0
+	tr.ResponseHeaderTimeout = 60 * time.Second
 	tr.DisableKeepAlives = false
 	if proxyRaw != "" {
 		c.SetProxyURL(proxyRaw)

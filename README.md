@@ -8,12 +8,15 @@
 
 - 用 `refresh_token` 管理账号，自动刷新 `access_token`
 - 调用 Cloud Code `loadCodeAssist` / `fetchAvailableModels` / `retrieveUserQuotaSummary`
-- 兼容 OpenAI `/v1/chat/completions`、`/v1/responses`、Claude `/v1/messages`、Gemini `/v1beta/models/*`
+- 兼容 OpenAI Chat、Responses、Legacy Completions、Claude Messages、Gemini；计数接口独立调用 countTokens
+- Images 生成/编辑和音频转录（支持范围见下方修复说明）
 - 转换成 Cloud Code `v1internal` 的 `generateContent` / `streamGenerateContent`
 - 支持流式、工具调用、thinking
-- 账号轮询，自动跳过停用和过期账号，429 时换号重试，不冻结该账号
+- 按模型、配额和进行中请求公平调度账号；429 解析等待提示、短时同号重试、换号及跨请求冷却，冷却到期自动恢复
 - 批次导入，可手动选择购买日期，到期时间 = 购买日 + 30 天
 - 独立配额：OSS、Gemini Pro、Gemini Flash、Claude
+
+并发设计、协议支持边界和本次修复验证见 [反代修复与运行说明](docs/proxy-hardening.md)。
 
 ## 生产环境（Docker）
 
@@ -138,5 +141,11 @@ Authorization: Bearer <API_KEY>
 | `API_KEY` | `sk-antigravity` | 反代调用密钥 |
 | `BATCH_VALIDITY_DAYS` | `30` | 批次有效天数 |
 | `SKIP_EXPIRED_ACCOUNTS` | `true` | 过期账号不进入代理池 |
+| `MAX_CONCURRENT_REQUESTS` | `128` | 单进程活跃 API 请求上限，最大 4096；含 SSE 和计数请求 |
+| `MAX_CONCURRENT_PER_ACCOUNT` | `4` | 单账号同时进行的上游请求上限 |
+| `MAX_RETRY_ATTEMPTS` | `5` | 账号轮换尝试上限，最大 20；短时重试和 401 刷新各账号最多额外一次 |
+| `ADMISSION_TIMEOUT_SECONDS` | `5` | 入口等待并发名额的最长秒数 |
+| `REQUEST_TIMEOUT_SECONDS` | `600` | 一条已受理代理请求的总超时，含选号、重试和流读取 |
+| `SHUTDOWN_TIMEOUT_SECONDS` | `30` | 停机时等待在途请求的最长秒数 |
 
 生产环境请务必修改 `ADMIN_TOKEN` 和 `API_KEY`。

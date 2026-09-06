@@ -10,7 +10,7 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <BrowserRouter>
       <App />
-      <Toast.Provider placement="top-end" maxVisibleToasts={3} width={360} />
+      <Toast.Provider placement="top end" maxVisibleToasts={3} width={360} />
     </BrowserRouter>
   </StrictMode>
 );

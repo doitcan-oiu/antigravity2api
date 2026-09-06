@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/wo/antigravity2api/internal/models"
 	"github.com/wo/antigravity2api/internal/outbound"
+	"github.com/wo/antigravity2api/internal/pool"
 )
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -18,6 +19,23 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
+	}
+	accounts, err := s.store.ListAccountsContext(r.Context(), "")
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	states := s.pool.RuntimeStates()
+	d.RateLimited, d.ActiveAccounts = 0, 0
+	for i := range accounts {
+		decorateRuntimeAccount(&accounts[i], states[accounts[i].ID])
+		a := &accounts[i]
+		if a.RateLimitedUntil > time.Now().Unix() || len(a.ModelCooldowns) > 0 {
+			d.RateLimited++
+		}
+		if a.Status == "active" {
+			d.ActiveAccounts++
+		}
 	}
 	d.CatalogModels = len(s.modelCatalog())
 	d.HasAPIKey = strings.TrimSpace(s.store.GetSetting("api_key", s.cfg.APIKey)) != ""
@@ -120,7 +138,7 @@ func (s *Server) createBatchImport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
-	res, err := s.pool.Import(body.Name, body.Note, body.Raw, parsePurchaseDate(body.PurchasedAt))
+	res, err := s.pool.ImportContext(r.Context(), body.Name, body.Note, body.Raw, parsePurchaseDate(body.PurchasedAt))
 	if err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
@@ -135,7 +153,15 @@ func (s *Server) getBatch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 404, map[string]any{"error": "batch not found"})
 		return
 	}
-	accs, _ := s.store.ListAccounts(id)
+	accs, err := s.store.ListAccountsContext(r.Context(), id)
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	states := s.pool.RuntimeStates()
+	for i := range accs {
+		decorateRuntimeAccount(&accs[i], states[accs[i].ID])
+	}
 	writeJSON(w, 200, map[string]any{"batch": b, "accounts": accs})
 }
 
@@ -214,7 +240,7 @@ func (s *Server) importIntoBatch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
-	res, err := s.pool.ImportInto(id, body.Raw)
+	res, err := s.pool.ImportIntoContext(r.Context(), id, body.Raw)
 	if err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
@@ -224,39 +250,40 @@ func (s *Server) importIntoBatch(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 	batchID := r.URL.Query().Get("batch_id")
-	list, err := s.store.ListAccounts(batchID)
+	list, err := s.store.ListAccountsContext(r.Context(), batchID)
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
+	states := s.pool.RuntimeStates()
 	for i := range list {
-		list[i].RefreshToken = ""
-		list[i].AccessToken = ""
+		decorateRuntimeAccount(&list[i], states[list[i].ID])
 	}
 	writeJSON(w, 200, map[string]any{"items": list})
 }
 
 func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	acc, err := s.store.GetAccount(id)
+	acc, err := s.store.GetAccountContext(r.Context(), id)
 	if err != nil {
 		writeJSON(w, 404, map[string]any{"error": "account not found"})
 		return
 	}
-	acc.RefreshToken = ""
-	acc.AccessToken = ""
+	decorateRuntimeAccount(acc, s.pool.RuntimeStates()[acc.ID])
 	writeJSON(w, 200, acc)
 }
 
 func (s *Server) refreshAccount(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	acc, err := s.pool.RefreshAccount(id)
+	acc, err := s.pool.RefreshAccountContext(r.Context(), id)
 	if err != nil {
-		writeJSON(w, 400, map[string]any{"error": err.Error(), "account": acc})
+		if acc != nil {
+			decorateRuntimeAccount(acc, s.pool.RuntimeStates()[acc.ID])
+		}
+		writeJSON(w, 400, map[string]any{"error": sanitizeError(err.Error()), "account": acc})
 		return
 	}
-	acc.RefreshToken = ""
-	acc.AccessToken = ""
+	decorateRuntimeAccount(acc, s.pool.RuntimeStates()[acc.ID])
 	writeJSON(w, 200, acc)
 }
 
@@ -295,7 +322,7 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) refreshAll(w http.ResponseWriter, r *http.Request) {
-	n, err := s.pool.RefreshAll()
+	n, err := s.pool.RefreshAllContext(r.Context(), false)
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
@@ -452,4 +479,21 @@ func atoi(s string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func decorateRuntimeAccount(a *models.Account, state pool.AccountRuntime) {
+	a.RefreshToken, a.AccessToken = "", ""
+	a.InFlight = state.Active
+	a.ModelCooldowns = state.ModelCooldowns
+	a.RateLimitedUntil = max(a.RateLimitedUntil, state.CooldownUntil)
+	if !a.Disabled && !a.Expired {
+		switch {
+		case a.Quota != nil && a.Quota.IsForbidden:
+			a.Status = "forbidden"
+		case a.RateLimitedUntil > time.Now().Unix():
+			a.Status = "rate_limited"
+		default:
+			a.Status = "active"
+		}
+	}
 }

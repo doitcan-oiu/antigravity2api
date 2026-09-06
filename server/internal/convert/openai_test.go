@@ -121,7 +121,7 @@ func TestNativeFlashDoesNotAutoInjectThinking(t *testing.T) {
 	}
 }
 
-func TestAssistantHistoryGetsThoughtBlock(t *testing.T) {
+func TestAssistantHistoryDoesNotInventThoughtBlock(t *testing.T) {
 	req := OpenAIRequest{
 		Model: "gemini-3.7-flash",
 		Messages: []OpenAIMessage{
@@ -142,8 +142,8 @@ func TestAssistantHistoryGetsThoughtBlock(t *testing.T) {
 		if len(parts) == 0 {
 			t.Fatal("empty model parts")
 		}
-		if !partIsThought(AsMap(parts[0])) {
-			t.Fatalf("first part should be thought %#v", parts[0])
+		if partIsThought(AsMap(parts[0])) {
+			t.Fatalf("must not invent thought history %#v", parts[0])
 		}
 		found = true
 	}
@@ -152,7 +152,7 @@ func TestAssistantHistoryGetsThoughtBlock(t *testing.T) {
 	}
 }
 
-func TestGeminiToOpenAIPromotesThoughtOnly(t *testing.T) {
+func TestGeminiToOpenAIKeepsThoughtSeparate(t *testing.T) {
 	raw := []byte(`{"candidates":[{"content":{"parts":[{"text":"secret answer","thought":true}]},"finishReason":"STOP"}]}`)
 	out, err := GeminiToOpenAI("gemini-3.7-flash", raw, "chatcmpl-1")
 	if err != nil {
@@ -161,7 +161,7 @@ func TestGeminiToOpenAIPromotesThoughtOnly(t *testing.T) {
 	payload := mustMap(out)
 	choices := AsSlice(payload["choices"])
 	msg := AsMap(AsMap(choices[0])["message"])
-	if AsString(msg["content"]) != "secret answer" {
+	if AsString(msg["content"]) != "" || AsString(msg["reasoning_content"]) != "secret answer" {
 		t.Fatalf("content %#v", msg["content"])
 	}
 }

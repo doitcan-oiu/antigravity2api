@@ -9,61 +9,60 @@ import (
 )
 
 type ClaudeRequest struct {
-	Model       string   `json:"model"`
-	Messages    []any    `json:"messages"`
-	System      any      `json:"system"`
-	Tools       []any    `json:"tools"`
-	Stream      bool     `json:"stream"`
-	MaxTokens   *int     `json:"max_tokens"`
-	Temperature *float64 `json:"temperature"`
-	TopP        *float64 `json:"top_p"`
-	Thinking    *struct {
-		Type         string `json:"type"`
-		BudgetTokens *int   `json:"budget_tokens"`
-	} `json:"thinking"`
-	ToolChoice any `json:"tool_choice"`
+	Model         string          `json:"model"`
+	Messages      []any           `json:"messages"`
+	System        any             `json:"system"`
+	Tools         []any           `json:"tools"`
+	Stream        bool            `json:"stream"`
+	MaxTokens     *int            `json:"max_tokens"`
+	Temperature   *float64        `json:"temperature"`
+	TopP          *float64        `json:"top_p"`
+	TopK          *int            `json:"top_k"`
+	Thinking      *OpenAIThinking `json:"thinking"`
+	ToolChoice    any             `json:"tool_choice"`
+	StopSequences any             `json:"stop_sequences"`
+	OutputConfig  any             `json:"output_config"`
+	Metadata      any             `json:"metadata"`
+	Size          string          `json:"size"`
+	Quality       string          `json:"quality"`
+	ImageSize     string          `json:"imageSize"`
 }
 
 func ClaudeToGemini(req ClaudeRequest, projectID, email, accountID string) (OuterRequest, string, bool) {
-	mapped := MapModel(req.Model)
-	var systemParts []string
-	switch s := req.System.(type) {
-	case string:
-		if strings.TrimSpace(s) != "" {
-			systemParts = append(systemParts, s)
-		}
-	case []any:
-		for _, item := range s {
-			m := AsMap(item)
-			if m != nil {
-				if t := AsString(m["text"]); t != "" {
-					systemParts = append(systemParts, t)
-				}
+	return ClaudeToGeminiWithModel(req, projectID, email, accountID, "")
+}
+func ClaudeToGeminiWithModel(req ClaudeRequest, projectID, email, accountID, finalModel string) (OuterRequest, string, bool) {
+	effort := AsString(GetPath(req.OutputConfig, "effort"))
+	mapped := requestModel(req.Model, finalModel, req.Thinking, effort)
+	tools := flattenTools(req.Tools, "")
+	names := map[string]string{}
+	for _, v := range req.Messages {
+		m := AsMap(v)
+		for _, v := range AsSlice(m["content"]) {
+			b := AsMap(v)
+			if AsString(b["type"]) == "tool_use" {
+				names[AsString(b["id"])] = resolveDeclaredToolName(AsString(b["name"]), tools)
 			}
 		}
 	}
-
-	contents := make([]map[string]any, 0)
-	for _, msg := range req.Messages {
-		m := AsMap(msg)
+	var contents []map[string]any
+	for _, v := range req.Messages {
+		m := AsMap(v)
 		if m == nil {
 			continue
 		}
-		role := strings.ToLower(AsString(m["role"]))
-		geminiRole := "user"
-		if role == "assistant" {
-			geminiRole = "model"
+		role := "user"
+		if AsString(m["role"]) == "assistant" {
+			role = "model"
 		}
-		parts := claudeContentToParts(m["content"], geminiRole == "model")
-		if len(parts) == 0 {
-			continue
+		parts := claudeParts(m["content"], role == "model", names, mapped)
+		if len(parts) > 0 {
+			contents = append(contents, map[string]any{"role": role, "parts": parts})
 		}
-		contents = append(contents, map[string]any{"role": geminiRole, "parts": parts})
 	}
 	if len(contents) == 0 {
 		contents = append(contents, map[string]any{"role": "user", "parts": []any{map[string]any{"text": " "}}})
 	}
-
 	gen := map[string]any{}
 	if req.Temperature != nil {
 		gen["temperature"] = *req.Temperature
@@ -71,201 +70,187 @@ func ClaudeToGemini(req ClaudeRequest, projectID, email, accountID string) (Oute
 	if req.TopP != nil {
 		gen["topP"] = *req.TopP
 	}
-	maxTok := 0
+	if req.TopK != nil {
+		gen["topK"] = *req.TopK
+	}
 	if req.MaxTokens != nil {
-		maxTok = *req.MaxTokens
-		gen["maxOutputTokens"] = maxTok
+		gen["maxOutputTokens"] = *req.MaxTokens
 	}
-	includeThoughts := IsThinkingModel(mapped)
-	if req.Thinking != nil {
-		if strings.EqualFold(req.Thinking.Type, "enabled") {
-			includeThoughts = true
-		}
-		if strings.EqualFold(req.Thinking.Type, "disabled") {
-			includeThoughts = false
-		}
+	applyThinking(gen, mapped, req.Thinking, effort)
+	setStop(gen, req.StopSequences)
+	if format := AsMap(GetPath(req.OutputConfig, "format")); format != nil && AsString(format["type"]) == "json_schema" {
+		gen["responseMimeType"] = "application/json"
+		gen["responseSchema"] = CleanSchema(format["schema"])
 	}
-	if includeThoughts && !IsImageModel(mapped) {
-		budget := DefaultThinkingBudget(mapped)
-		if req.Thinking != nil && req.Thinking.BudgetTokens != nil {
-			budget = *req.Thinking.BudgetTokens
-		}
-		gen["thinkingConfig"] = map[string]any{"includeThoughts": true, "thinkingBudget": budget}
+	session := SessionID(accountID, AsString(GetPath(req.Metadata, "user_id")))
+	inner := InnerRequest{Contents: mergeContents(contents), GenerationConfig: gen, SafetySettings: SafetyOff(), SessionID: session}
+	if system := extractText(req.System); system != "" {
+		inner.SystemInstruction = map[string]any{"role": "system", "parts": []any{map[string]any{"text": system}}}
 	}
-
-	inner := InnerRequest{
-		Contents:         contents,
-		GenerationConfig: gen,
-		SafetySettings:   SafetyOff(),
-		SessionID:        SessionID(accountID, ""),
+	attachTools(&inner, claudeTools(tools), tools, req.ToolChoice, req.Model)
+	if IsImageModel(mapped) {
+		imageGenerationConfig(gen, req.Model, req.Size, req.Quality, req.ImageSize)
 	}
-	if len(systemParts) > 0 {
-		inner.SystemInstruction = map[string]any{
-			"role":  "user",
-			"parts": []any{map[string]any{"text": strings.Join(systemParts, "\n\n")}},
-		}
-	}
-	if decls := claudeTools(req.Tools); len(decls) > 0 {
-		inner.Tools = []any{map[string]any{"functionDeclarations": decls}}
-		mode := "AUTO"
-		if tc := AsMap(req.ToolChoice); tc != nil {
-			switch AsString(tc["type"]) {
-			case "any":
-				mode = "ANY"
-			case "none":
-				mode = "NONE"
-			}
-		}
-		inner.ToolConfig = map[string]any{"functionCallingConfig": map[string]any{"mode": mode}}
-	}
-	return Wrap(projectID, mapped, email, SessionID(accountID, ""), inner, IsImageModel(mapped)), mapped, req.Stream
+	return Wrap(projectID, mapped, email, session, inner, IsImageModel(mapped)), mapped, req.Stream
 }
-
 func claudeContentToParts(content any, isModel bool) []any {
-	parts := make([]any, 0)
-	switch c := content.(type) {
-	case string:
-		if strings.TrimSpace(c) != "" {
-			parts = append(parts, map[string]any{"text": c})
+	return claudeParts(content, isModel, nil, "")
+}
+func claudeParts(content any, isModel bool, names map[string]string, model string) []any {
+	if _, ok := content.(string); ok {
+		return contentToParts(content)
+	}
+	var parts []any
+	lastSignature := ""
+	for _, v := range AsSlice(content) {
+		m := AsMap(v)
+		if m == nil {
+			continue
 		}
-	case []any:
-		for _, item := range c {
-			m := AsMap(item)
-			if m == nil {
+		switch AsString(m["type"]) {
+		case "thinking":
+			lastSignature = thoughtSignature(m)
+			if t := AsString(m["thinking"]); t != "" {
+				parts = append(parts, withSignature(map[string]any{"text": t, "thought": true}, lastSignature))
+			}
+		case "redacted_thinking":
+			if data := AsString(m["data"]); data != "" {
+				parts = append(parts, map[string]any{"text": "[Redacted thinking: " + data + "]"})
+			}
+		case "tool_use":
+			if !isModel {
 				continue
 			}
-			switch AsString(m["type"]) {
-			case "text":
-				if t := AsString(m["text"]); t != "" {
-					parts = append(parts, map[string]any{"text": t})
-				}
-			case "thinking":
-				if t := AsString(m["thinking"]); t != "" {
-					parts = append(parts, map[string]any{"text": t, "thought": true})
-				}
-			case "image":
-				src := AsMap(m["source"])
-				if src != nil && AsString(src["type"]) == "base64" {
-					parts = append(parts, map[string]any{
-						"inlineData": map[string]any{
-							"mimeType": firstNonEmpty(AsString(src["media_type"]), "image/jpeg"),
-							"data":     AsString(src["data"]),
-						},
-					})
-				}
-			case "tool_use":
-				if isModel {
-					fc := map[string]any{"name": AsString(m["name"]), "args": m["input"]}
-					if id := AsString(m["id"]); id != "" {
-						fc["id"] = id
-					}
-					parts = append(parts, map[string]any{"functionCall": fc})
-				}
-			case "tool_result":
-				name := firstNonEmpty(AsString(m["name"]), "tool")
-				fr := map[string]any{
-					"name":     name,
-					"response": map[string]any{"result": extractText(m["content"])},
-				}
-				if id := AsString(m["tool_use_id"]); id != "" {
-					fr["id"] = id
-				}
-				parts = append(parts, map[string]any{"functionResponse": fr})
+			id := AsString(m["id"])
+			name := firstNonEmpty(names[id], normalizeToolName(AsString(m["name"])))
+			fc := map[string]any{"name": name, "args": jsonArguments(m["input"])}
+			if id != "" {
+				fc["id"] = id
 			}
+			sig := firstNonEmpty(thoughtSignature(m), lastSignature, RecallToolSignature(model, id))
+			parts = append(parts, withSignature(map[string]any{"functionCall": fc}, sig))
+		case "tool_result":
+			id := AsString(m["tool_use_id"])
+			name := firstNonEmpty(names[id], normalizeToolName(AsString(m["name"])), id, "tool")
+			result, media := partsTextAndMedia(m["content"])
+			response := map[string]any{"result": result}
+			if isError, _ := m["is_error"].(bool); isError {
+				response["error"] = result
+			}
+			fr := map[string]any{"name": name, "response": response}
+			if id != "" {
+				fr["id"] = id
+			}
+			parts = append(parts, map[string]any{"functionResponse": fr})
+			parts = append(parts, media...)
+		default:
+			parts = append(parts, contentToParts([]any{m})...)
 		}
 	}
 	return parts
 }
-
-func claudeTools(tools []any) []any {
-	decls := make([]any, 0)
-	for _, tool := range tools {
-		m := AsMap(tool)
-		if m == nil {
-			continue
-		}
-		name := AsString(m["name"])
-		if name == "" {
-			continue
-		}
-		decl := map[string]any{"name": name}
-		if d := AsString(m["description"]); d != "" {
-			decl["description"] = d
-		}
-		if schema := m["input_schema"]; schema != nil {
-			decl["parameters"] = schema
-		}
-		decls = append(decls, decl)
-	}
-	return decls
-}
+func claudeTools(tools []any) []any { return openaiTools(tools) }
 
 func GeminiToClaude(model string, raw []byte) ([]byte, error) {
 	var envelope map[string]any
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return nil, err
 	}
+	if err := payloadError(envelope); err != nil {
+		return nil, err
+	}
 	data := envelope
 	if r := AsMap(envelope["response"]); r != nil {
 		data = r
 	}
-	text, thinking, toolCalls, finish, usage := collectParts(data)
-	if text == "" && thinking != "" && len(toolCalls) == 0 {
-		text = thinking
+	if err := payloadError(data); err != nil {
+		return nil, err
 	}
 	content := make([]any, 0)
-	if thinking != "" {
-		content = append(content, map[string]any{"type": "thinking", "thinking": thinking})
+	finish := ""
+	tools := false
+	lastThinking := -1
+	cands := AsSlice(data["candidates"])
+	if len(cands) == 0 {
+		return nil, streamFailure("empty_response", "upstream returned no candidates")
 	}
-	if text != "" {
-		content = append(content, map[string]any{"type": "text", "text": text})
-	}
-	for _, tc := range toolCalls {
-		m := AsMap(tc)
-		fn := AsMap(m["function"])
-		var input any = map[string]any{}
-		if fn != nil {
-			_ = json.Unmarshal([]byte(AsString(fn["arguments"])), &input)
+	if len(cands) > 0 {
+		cand := AsMap(cands[0])
+		finish = AsString(cand["finishReason"])
+		for _, v := range AsSlice(GetPath(cand, "content", "parts")) {
+			p := AsMap(v)
+			if p == nil {
+				continue
+			}
+			sig := thoughtSignature(p)
+			if tc := partToToolCall(p); tc != nil {
+				fn := AsMap(tc["function"])
+				block := map[string]any{"type": "tool_use", "id": tc["id"], "name": fn["name"], "input": jsonArguments(fn["arguments"])}
+				if sig != "" {
+					block["signature"] = sig
+					RememberToolSignature(model, AsString(tc["id"]), sig)
+				}
+				content = append(content, block)
+				tools = true
+				lastThinking = -1
+				continue
+			}
+			if text := AsString(p["text"]); text != "" {
+				if partIsThought(p) {
+					block := map[string]any{"type": "thinking", "thinking": text}
+					if sig != "" {
+						block["signature"] = sig
+					}
+					content = append(content, block)
+					lastThinking = len(content) - 1
+				} else {
+					content = append(content, map[string]any{"type": "text", "text": text})
+					lastThinking = -1
+				}
+			}
+			if sig != "" && lastThinking >= 0 {
+				AsMap(content[lastThinking])["signature"] = sig
+			}
+			inline := AsMap(p["inlineData"])
+			if inline == nil {
+				inline = AsMap(p["inline_data"])
+			}
+			if inline != nil {
+				mt := firstNonEmpty(AsString(inline["mimeType"]), AsString(inline["mime_type"]), "image/png")
+				if strings.HasPrefix(mt, "image/") {
+					content = append(content, map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": mt, "data": inline["data"]}})
+				} else if t := imagePartText(p); t != "" {
+					content = append(content, map[string]any{"type": "text", "text": t})
+				}
+			}
 		}
-		content = append(content, map[string]any{
-			"type":  "tool_use",
-			"id":    AsString(m["id"]),
-			"name":  AsString(fn["name"]),
-			"input": input,
-		})
 	}
 	stop := "end_turn"
-	if len(toolCalls) > 0 {
+	if tools {
 		stop = "tool_use"
 	}
-	if strings.ToUpper(finish) == "MAX_TOKENS" {
+	switch strings.ToUpper(finish) {
+	case "MAX_TOKENS":
 		stop = "max_tokens"
+	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT":
+		stop = "refusal"
 	}
-	out := map[string]any{
-		"id":            "msg_" + uuid.NewString(),
-		"type":          "message",
-		"role":          "assistant",
-		"model":         model,
-		"content":       content,
-		"stop_reason":   stop,
-		"stop_sequence": nil,
-		"usage":         claudeUsage(usage),
+	usage := data["usageMetadata"]
+	if usage == nil {
+		usage = envelope["usageMetadata"]
 	}
-	return json.Marshal(out)
+	return json.Marshal(map[string]any{"id": "msg_" + uuid.NewString(), "type": "message", "role": "assistant", "model": model, "content": content, "stop_reason": stop, "stop_sequence": nil, "usage": claudeUsage(geminiUsageToOpenAI(usage))})
 }
-
 func claudeUsage(u any) map[string]any {
-	m := AsMap(u)
-	inTok, outTok := 0, 0
-	if m != nil {
-		if v, ok := m["prompt_tokens"].(int); ok {
-			inTok = v
-		}
-		if v, ok := m["completion_tokens"].(int); ok {
-			outTok = v
-		}
+	usage := TokenUsageFromOpenAI(u)
+	input := usage.Input - usage.Cache
+	if input < 0 {
+		input = 0
 	}
-	return map[string]any{"input_tokens": inTok, "output_tokens": outTok}
+	out := map[string]any{"input_tokens": input, "output_tokens": usage.Output}
+	if usage.Cache > 0 {
+		out["cache_read_input_tokens"] = usage.Cache
+	}
+	return out
 }
-
 func nowUnix() int64 { return time.Now().Unix() }

@@ -22,7 +22,7 @@ function isAbnormal(account: Account) {
 }
 
 function isReady(account: Account) {
-  return !account.expired && !account.disabled && account.status !== "rate_limited";
+  return !account.expired && !account.disabled && account.status !== "rate_limited" && !account.quota?.is_forbidden;
 }
 
 function QuotaCell({ account }: { account: Account }) {
@@ -200,7 +200,7 @@ export default function Accounts() {
     { key: "pro" as Plan, label: "Pro 账号数", value: counts.pro, hint: `可调度账号 ${counts.proReady}`, icon: Diamond, tone: "blue" },
     { key: "ultra" as Plan, label: "Ultra 账号数", value: counts.ultra, hint: `可调度账号 ${counts.ultraReady}`, icon: Gem, tone: "purple" },
     { key: "free" as Plan, label: "Free 账号数", value: counts.free, hint: `可调度账号 ${counts.freeReady}`, icon: Circle, tone: "gray" },
-    { key: "abnormal", label: "异常账号数", value: counts.abnormal, hint: counts.abnormal ? "需处理" : "正常", icon: AlertTriangle, tone: "warn" },
+    { key: "abnormal" as const, label: "异常账号数", value: counts.abnormal, hint: counts.abnormal ? "需处理" : "正常", icon: AlertTriangle, tone: "warn" },
   ];
 
   return (

@@ -6,47 +6,63 @@ import (
 )
 
 func NativeGeminiToInternal(body map[string]any, model, projectID, email, accountID string) (OuterRequest, string, bool) {
-	mapped := MapModel(model)
+	return NativeGeminiToInternalWithModel(body, model, projectID, email, accountID, "")
+}
+func NativeGeminiToInternalWithModel(body map[string]any, model, projectID, email, accountID, finalModel string) (OuterRequest, string, bool) {
+	body = AsMap(cloneValue(body))
 	innerMap := body
 	if req := AsMap(body["request"]); req != nil {
 		innerMap = req
 		if m := AsString(body["model"]); m != "" {
-			mapped = MapModel(m)
+			model = m
 		}
 	}
-	inner := InnerRequest{
-		SystemInstruction: innerMap["systemInstruction"],
-		Tools:             innerMap["tools"],
-		ToolConfig:        innerMap["toolConfig"],
-		GenerationConfig:  innerMap["generationConfig"],
-		SafetySettings:    innerMap["safetySettings"],
-		SessionID:         firstNonEmpty(AsString(innerMap["sessionId"]), SessionID(accountID, "")),
-		Contents:          innerMap["contents"],
+	mapped := finalModel
+	if mapped == "" {
+		mapped = MapModel(strings.TrimSuffix(model, "-online"))
 	}
+	aliases := map[string]string{"system_instruction": "systemInstruction", "generation_config": "generationConfig", "tool_config": "toolConfig", "safety_settings": "safetySettings", "session_id": "sessionId"}
+	for from, to := range aliases {
+		if innerMap[to] == nil {
+			innerMap[to] = innerMap[from]
+		}
+		delete(innerMap, from)
+	}
+	extra := AsMap(cloneValue(innerMap))
+	for _, k := range []string{"systemInstruction", "tools", "toolConfig", "generationConfig", "safetySettings", "sessionId", "contents", "stream", "model"} {
+		delete(extra, k)
+	}
+	inner := InnerRequest{SystemInstruction: innerMap["systemInstruction"], Tools: innerMap["tools"], ToolConfig: innerMap["toolConfig"], GenerationConfig: innerMap["generationConfig"], SafetySettings: innerMap["safetySettings"], SessionID: firstNonEmpty(AsString(innerMap["sessionId"]), SessionID(accountID, "")), Contents: innerMap["contents"], Extra: extra}
 	if inner.SafetySettings == nil {
 		inner.SafetySettings = SafetyOff()
 	}
-	if inner.GenerationConfig == nil {
-		inner.GenerationConfig = map[string]any{}
+	gc := AsMap(inner.GenerationConfig)
+	if gc == nil {
+		gc = map[string]any{}
 	}
-	if shouldAutoInjectThinking(mapped) {
-		gc := AsMap(inner.GenerationConfig)
-		if gc == nil {
-			gc = map[string]any{}
-		}
-		if gc["thinkingConfig"] == nil {
-			gc["thinkingConfig"] = map[string]any{
-				"includeThoughts": true,
-				"thinkingBudget":  DefaultThinkingBudget(mapped),
+	if shouldAutoInjectThinking(mapped) && gc["thinkingConfig"] == nil {
+		gc["thinkingConfig"] = map[string]any{"includeThoughts": true, "thinkingBudget": DefaultThinkingBudget(mapped)}
+	}
+	if IsImageModel(mapped) {
+		imageGenerationConfig(gc, model, "", "", "")
+	}
+	inner.GenerationConfig = gc
+	for _, v := range AsSlice(inner.Tools) {
+		tool := AsMap(v)
+		for _, d := range AsSlice(tool["functionDeclarations"]) {
+			decl := AsMap(d)
+			if schema := decl["parameters"]; schema != nil {
+				decl["parameters"] = CleanSchema(schema)
 			}
-			inner.GenerationConfig = gc
 		}
 	}
-	stream := false
-	if v, ok := body["stream"].(bool); ok {
-		stream = v
+	if strings.HasSuffix(strings.ToLower(model), "-online") {
+		ts := AsSlice(inner.Tools)
+		ts = append(ts, map[string]any{"googleSearch": map[string]any{}})
+		inner.Tools = ts
 	}
-	return Wrap(projectID, mapped, email, SessionID(accountID, ""), inner, IsImageModel(mapped)), mapped, stream
+	stream, _ := body["stream"].(bool)
+	return Wrap(projectID, mapped, email, AsString(inner.SessionID), inner, IsImageModel(mapped)), mapped, stream
 }
 
 func UnwrapGemini(raw []byte) ([]byte, error) {

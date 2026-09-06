@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -60,13 +61,17 @@ func (c *Client) client() *http.Client {
 }
 
 func (c *Client) Refresh(refreshToken string) (*TokenResponse, error) {
+	return c.RefreshContext(context.Background(), refreshToken)
+}
+
+func (c *Client) RefreshContext(ctx context.Context, refreshToken string) (*TokenResponse, error) {
 	form := url.Values{}
 	form.Set("client_id", c.cfg.OAuthClientID)
 	form.Set("client_secret", c.cfg.OAuthClientSecret)
 	form.Set("refresh_token", refreshToken)
 	form.Set("grant_type", "refresh_token")
 
-	req, err := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +83,13 @@ func (c *Client) Refresh(refreshToken string) (*TokenResponse, error) {
 		return nil, fmt.Errorf("refresh request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read refresh response: %w", err)
+	}
+	if len(body) > 1<<20 {
+		return nil, fmt.Errorf("refresh response too large")
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("refresh failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
@@ -96,7 +107,11 @@ func (c *Client) Refresh(refreshToken string) (*TokenResponse, error) {
 }
 
 func (c *Client) UserInfo(accessToken string) (*UserInfo, error) {
-	req, err := http.NewRequest(http.MethodGet, userInfoURL, nil)
+	return c.UserInfoContext(context.Background(), accessToken)
+}
+
+func (c *Client) UserInfoContext(ctx context.Context, accessToken string) (*UserInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, userInfoURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +122,13 @@ func (c *Client) UserInfo(accessToken string) (*UserInfo, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read userinfo response: %w", err)
+	}
+	if len(body) > 1<<20 {
+		return nil, fmt.Errorf("userinfo response too large")
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("userinfo failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}

@@ -31,6 +31,7 @@ type Client struct {
 	machineID string
 	sessionID string
 	version   string
+	endpoints []string
 }
 
 func New(cfg config.Config, out *outbound.Manager) *Client {
@@ -43,6 +44,7 @@ func New(cfg config.Config, out *outbound.Manager) *Client {
 		machineID: loadOrCreateMachineID(cfg.DataDir),
 		sessionID: uuid.NewString(),
 		version:   parseAntigravityVersion(cfg.UserAgent),
+		endpoints: append([]string(nil), bases...),
 	}
 }
 
@@ -52,17 +54,17 @@ func (c *Client) client() *http.Client {
 
 func (c *Client) doJSON(ctx context.Context, method, accessToken string, payload any, query string) (*http.Response, []byte, error) {
 	if ctx == nil {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
+		ctx = context.Background()
 	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
 	resp, err := c.call(ctx, method, accessToken, payload, query, false)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	return resp, data, nil
+	data, err := readBounded(resp.Body, 8<<20)
+	return resp, data, err
 }
 
 func (c *Client) Stream(ctx context.Context, method, accessToken string, payload any, query string) (*http.Response, error) {
@@ -73,14 +75,24 @@ func (c *Client) Stream(ctx context.Context, method, accessToken string, payload
 }
 
 func (c *Client) call(ctx context.Context, method, accessToken string, payload any, query string, stream bool) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
 	stripProject := false
 	var lastErr error
+	endpoints := c.endpoints
+	if len(endpoints) == 0 {
+		endpoints = bases
+	}
 	for attempt := 0; attempt < 2; attempt++ {
-		for i, base := range bases {
+		for i, base := range endpoints {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			url := base + ":" + method
 			if query != "" {
 				url += "?" + query
@@ -102,15 +114,18 @@ func (c *Client) call(ctx context.Context, method, accessToken string, payload a
 				lastErr = err
 				continue
 			}
-			if shouldFallback(resp.StatusCode) && i < len(bases)-1 {
-				io.Copy(io.Discard, resp.Body)
+			if shouldFallback(resp.StatusCode) && i < len(endpoints)-1 {
+				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 				resp.Body.Close()
 				lastErr = fmt.Errorf("%s returned %d", url, resp.StatusCode)
 				continue
 			}
 			if resp.StatusCode == 403 && !stripProject && req.Header.Get("x-goog-user-project") != "" {
-				peek, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+				peek, readErr := readBounded(resp.Body, 1<<20)
 				resp.Body.Close()
+				if readErr != nil {
+					return nil, readErr
+				}
 				if isServiceDisabled(peek) {
 					stripProject = true
 					lastErr = fmt.Errorf("%s returned 403 SERVICE_DISABLED", url)
@@ -161,10 +176,14 @@ func shouldFallback(status int) bool {
 }
 
 func (c *Client) LoadCodeAssist(accessToken string) (projectID, tier string, err error) {
+	return c.LoadCodeAssistContext(context.Background(), accessToken)
+}
+
+func (c *Client) LoadCodeAssistContext(ctx context.Context, accessToken string) (projectID, tier string, err error) {
 	payload := map[string]any{
 		"metadata": map[string]any{"ideType": "ANTIGRAVITY"},
 	}
-	resp, data, err := c.doJSON(nil, "loadCodeAssist", accessToken, payload, "")
+	resp, data, err := c.doJSON(ctx, "loadCodeAssist", accessToken, payload, "")
 	if err != nil {
 		return "", "", err
 	}
@@ -194,16 +213,20 @@ type tierInfo struct {
 }
 
 func (c *Client) FetchQuota(accessToken, projectID string) (*models.QuotaData, error) {
+	return c.FetchQuotaContext(context.Background(), accessToken, projectID)
+}
+
+func (c *Client) FetchQuotaContext(ctx context.Context, accessToken, projectID string) (*models.QuotaData, error) {
 	payload := map[string]any{}
 	if projectID != "" {
 		payload["project"] = projectID
 	}
-	resp, data, err := c.doJSON(nil, "fetchAvailableModels", accessToken, payload, "")
+	resp, data, err := c.doJSON(ctx, "fetchAvailableModels", accessToken, payload, "")
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode == 403 && projectID != "" {
-		resp, data, err = c.doJSON(nil, "fetchAvailableModels", accessToken, map[string]any{}, "")
+		resp, data, err = c.doJSON(ctx, "fetchAvailableModels", accessToken, map[string]any{}, "")
 		if err != nil {
 			return nil, err
 		}
@@ -238,6 +261,7 @@ func (c *Client) FetchQuota(accessToken, projectID string) (*models.QuotaData, e
 	}
 	for name, info := range parsed.Models {
 		mq := models.ModelQuota{
+			Percentage:       -1,
 			Name:             name,
 			DisplayName:      info.DisplayName,
 			SupportsImages:   info.SupportsImages,
@@ -256,19 +280,23 @@ func (c *Client) FetchQuota(accessToken, projectID string) (*models.QuotaData, e
 	for oldID, info := range parsed.Deprecated {
 		q.ForwardingRules[oldID] = info.NewModelID
 	}
-	if groups := c.fetchQuotaSummary(accessToken, projectID); len(groups) > 0 {
+	if groups := c.fetchQuotaSummaryContext(ctx, accessToken, projectID); len(groups) > 0 {
 		q.QuotaGroups = groups
 	}
 	return q, nil
 }
 
 func (c *Client) fetchQuotaSummary(accessToken, projectID string) []models.QuotaGroup {
+	return c.fetchQuotaSummaryContext(context.Background(), accessToken, projectID)
+}
+
+func (c *Client) fetchQuotaSummaryContext(ctx context.Context, accessToken, projectID string) []models.QuotaGroup {
 	try := func(pid string) []models.QuotaGroup {
 		payload := map[string]any{}
 		if pid != "" {
 			payload["project"] = pid
 		}
-		resp, data, err := c.doJSON(nil, "retrieveUserQuotaSummary", accessToken, payload, "")
+		resp, data, err := c.doJSON(ctx, "retrieveUserQuotaSummary", accessToken, payload, "")
 		if err != nil || resp.StatusCode >= 400 {
 			return nil
 		}
@@ -295,18 +323,55 @@ func (c *Client) Generate(ctx context.Context, accessToken string, payload any, 
 		return resp, nil, nil
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-	if err != nil {
-		return resp, nil, err
-	}
 	if resp.StatusCode >= 400 {
-		return resp, data, nil
-	}
-	collected, err := convert.CollectGeminiJSON(bytes.NewReader(data))
-	if err != nil {
+		data, err := readBounded(resp.Body, 1<<20)
 		return resp, data, err
 	}
-	return resp, collected, nil
+	// Aggregate incrementally; buffering the entire SSE stream first duplicates memory.
+	collected, err := convert.CollectGeminiJSON(resp.Body)
+	return resp, collected, err
+}
+
+func (c *Client) GenerateDirect(ctx context.Context, accessToken string, payload any) (*http.Response, []byte, error) {
+	resp, err := c.call(ctx, "generateContent", accessToken, payload, "", false)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	limit := int64(64 << 20)
+	if resp.StatusCode >= 400 {
+		limit = 1 << 20
+	}
+	data, err := readBounded(resp.Body, limit)
+	return resp, data, err
+}
+
+// CountTokens uses its own upstream action and never consumes a generation request.
+func (c *Client) CountTokens(ctx context.Context, accessToken, _ string, request any) (*http.Response, []byte, error) {
+	raw, err := json.Marshal(request)
+	if err != nil {
+		return nil, nil, err
+	}
+	var inner map[string]any
+	if err = json.Unmarshal(raw, &inner); err != nil {
+		return nil, nil, err
+	}
+	delete(inner, "sessionId")
+	delete(inner, "safetySettings")
+	delete(inner, "generationConfig")
+	delete(inner, "toolConfig")
+	return c.doJSON(ctx, "countTokens", accessToken, map[string]any{"request": inner}, "")
+}
+
+func readBounded(src io.Reader, limit int64) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(src, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > limit {
+		return nil, fmt.Errorf("upstream response exceeds %d bytes", limit)
+	}
+	return b, nil
 }
 
 type noLenReader struct{ r io.Reader }
@@ -322,6 +387,18 @@ func requestBody(body []byte, chunked bool) io.Reader {
 }
 
 func payloadModel(payload any) string {
+	switch v := payload.(type) {
+	case convert.OuterRequest:
+		return strings.TrimSpace(v.Model)
+	case *convert.OuterRequest:
+		if v != nil {
+			return strings.TrimSpace(v.Model)
+		}
+		return ""
+	case map[string]any:
+		value, _ := v["model"].(string)
+		return strings.TrimSpace(value)
+	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return ""
@@ -337,6 +414,12 @@ func payloadModel(payload any) string {
 func payloadProject(payload any) string {
 	var project string
 	switch v := payload.(type) {
+	case convert.OuterRequest:
+		project = v.Project
+	case *convert.OuterRequest:
+		if v != nil {
+			project = v.Project
+		}
 	case map[string]any:
 		project, _ = v["project"].(string)
 	default:

@@ -114,7 +114,8 @@ function pickBucket(group: QuotaGroup | null, window: QuotaWindow) {
 }
 
 function pct(fraction: number | undefined | null) {
-  return Math.round((fraction || 0) * 100);
+  if (fraction == null || !Number.isFinite(fraction) || fraction < 0) return null;
+  return Math.round(Math.min(fraction, 1) * 100);
 }
 
 function modelQuota(account: Account, kind: QuotaKind) {
@@ -129,7 +130,7 @@ function meterFor(account: Account, kind: QuotaKind): QuotaMeter {
   const group = findGroup(account.quota?.quota_groups, kind);
   const weekly = pickBucket(group, "weekly");
   const rolling = pickBucket(group, "5h");
-  const modelPercent = found ? found.percentage : null;
+  const modelPercent = found && found.percentage >= 0 ? found.percentage : null;
   const rollingPercent = rolling ? pct(rolling.remaining_fraction) : null;
   const fiveHourPercent = modelPercent ?? rollingPercent;
   const fiveHourReset = rolling?.reset_time || found?.reset_time;
@@ -242,13 +243,13 @@ export function quotaGroups(account: Account): QuotaGroupView[] {
     if (!weekly && meter.window === "weekly" && meter.percent != null) {
       weekly = fakeBucket(meter.percent, meter.reset);
     }
-    if (!weekly && found && inferWindow(found.reset_time) === "weekly") {
+    if (!weekly && found && found.percentage >= 0 && inferWindow(found.reset_time) === "weekly") {
       weekly = fakeBucket(found.percentage, found.reset_time);
     }
     if (!rolling && meter.window === "5h" && meter.percent != null) {
       rolling = fakeBucket(meter.percent, meter.reset);
     }
-    if (!rolling && found && inferWindow(found.reset_time) === "5h") {
+    if (!rolling && found && found.percentage >= 0 && inferWindow(found.reset_time) === "5h") {
       rolling = fakeBucket(found.percentage, found.reset_time);
     }
 

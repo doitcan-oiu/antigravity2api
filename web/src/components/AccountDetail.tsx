@@ -76,7 +76,12 @@ export default function AccountDetail({ account, onClose }: { account: Account; 
           <div><span>最近使用</span><strong>{fmtTime(account.last_used)}</strong></div>
           <div><span>额度更新</span><strong>{fmtTime(account.quota?.last_updated)}</strong></div>
           <div><span>项目</span><strong>{account.project_id || "—"}</strong></div>
+          <div><span>进行中请求</span><strong>{account.in_flight ?? 0}</strong></div>
+          {account.rate_limited_until ? <div><span>账号冷却至</span><strong>{fmtTime(account.rate_limited_until)}</strong></div> : null}
         </div>
+        {Object.entries(account.model_cooldowns || {}).map(([model, until]) => (
+          <p className="muted" key={model}>{model} 冷却至 {fmtTime(until)}</p>
+        ))}
         {account.last_error ? <p className="acct-last-error">{account.last_error}</p> : null}
         {account.disabled_reason ? <p className="muted" style={{ margin: 0, fontSize: 13 }}>{account.disabled_reason}</p> : null}
 

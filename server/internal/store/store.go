@@ -1,15 +1,17 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,10 +21,27 @@ import (
 )
 
 type Store struct {
-	db         *sql.DB
-	settingsMu sync.RWMutex
-	settings   map[string]string
-	logCh      chan models.RequestLog
+	db             *sql.DB
+	readDB         *sql.DB
+	settingsMu     sync.RWMutex
+	settings       map[string]string
+	logCh          chan models.RequestLog
+	accountVersion atomic.Uint64
+	pickMu         sync.Mutex
+	pickVersion    uint64
+	pickAccounts   []models.Account
+	pickCursor     uint64
+	logMu          sync.RWMutex
+	logClosed      bool
+	logDone        chan struct{}
+	closeOnce      sync.Once
+	closeErr       error
+	logErrMu       sync.Mutex
+	logErr         error
+	droppedLogs    atomic.Uint64
+	logWriteErrors atomic.Uint64
+	usedMu         sync.Mutex
+	used           map[string]int64
 }
 
 func Open(dataDir string) (*Store, error) {
@@ -35,19 +54,44 @@ func Open(dataDir string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, settings: map[string]string{}, logCh: make(chan models.RequestLog, 2048)}
+	s := &Store{db: db, settings: map[string]string{}, logCh: make(chan models.RequestLog, 2048), logDone: make(chan struct{}), used: make(map[string]int64)}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
 	}
+	// Keep one write connection and a bounded read pool. WAL readers no longer
+	// occupy the connection needed to flush logs or update account credentials.
+	readDB, err := sql.Open("sqlite", dsn+"&_pragma=query_only(1)")
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	readDB.SetMaxOpenConns(4)
+	readDB.SetMaxIdleConns(4)
+	if err := readDB.Ping(); err != nil {
+		readDB.Close()
+		db.Close()
+		return nil, err
+	}
+	s.readDB = readDB
 	s.loadSettings()
+	s.accountVersion.Store(1)
 	go s.logWorker()
 	return s, nil
 }
 
 func (s *Store) Close() error {
-	close(s.logCh)
-	return s.db.Close()
+	s.closeOnce.Do(func() {
+		s.logMu.Lock()
+		s.logClosed = true
+		close(s.logCh)
+		s.logMu.Unlock()
+		<-s.logDone
+		s.logErrMu.Lock()
+		s.closeErr = errors.Join(s.logErr, s.readDB.Close(), s.db.Close())
+		s.logErrMu.Unlock()
+	})
+	return s.closeErr
 }
 
 func (s *Store) migrate() error {
@@ -123,7 +167,7 @@ CREATE INDEX IF NOT EXISTS idx_accounts_pick ON accounts(disabled, last_used);
 }
 
 func (s *Store) loadSettings() {
-	rows, err := s.db.Query(`SELECT key, value FROM settings`)
+	rows, err := s.readDB.Query(`SELECT key, value FROM settings`)
 	if err != nil {
 		return
 	}
@@ -148,15 +192,7 @@ func (s *Store) GetSetting(key, fallback string) string {
 		return v
 	}
 	s.settingsMu.RUnlock()
-	var v string
-	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
-	if err != nil || v == "" {
-		return fallback
-	}
-	s.settingsMu.Lock()
-	s.settings[key] = v
-	s.settingsMu.Unlock()
-	return v
+	return fallback
 }
 
 func (s *Store) BoolSetting(key string, fallback bool) bool {
@@ -232,7 +268,7 @@ func (s *Store) decorateBatch(b *models.Batch, now time.Time) {
 }
 
 func (s *Store) ListBatches() ([]models.Batch, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.readDB.Query(`
 SELECT b.id, b.name, b.note, b.created_at, COALESCE(b.purchased_at, b.created_at), b.expires_at,
        COUNT(a.id),
        COALESCE(SUM(CASE WHEN a.disabled = 0 THEN 1 ELSE 0 END), 0),
@@ -263,13 +299,13 @@ ORDER BY b.created_at DESC`)
 
 func (s *Store) GetBatch(id string) (*models.Batch, error) {
 	var b models.Batch
-	err := s.db.QueryRow(`SELECT id, name, note, created_at, COALESCE(purchased_at, created_at), expires_at FROM batches WHERE id = ?`, id).
+	err := s.readDB.QueryRow(`SELECT id, name, note, created_at, COALESCE(purchased_at, created_at), expires_at FROM batches WHERE id = ?`, id).
 		Scan(&b.ID, &b.Name, &b.Note, &b.CreatedAt, &b.PurchasedAt, &b.ExpiresAt)
 	if err != nil {
 		return nil, err
 	}
 	s.decorateBatch(&b, time.Now())
-	_ = s.db.QueryRow(`
+	_ = s.readDB.QueryRow(`
 SELECT COUNT(*), SUM(CASE WHEN disabled = 0 THEN 1 ELSE 0 END), SUM(CASE WHEN disabled = 1 THEN 1 ELSE 0 END)
 FROM accounts WHERE batch_id = ?`, b.ID).Scan(&b.AccountCount, &b.ActiveCount, &b.DisabledCount)
 	return &b, nil
@@ -277,6 +313,9 @@ FROM accounts WHERE batch_id = ?`, b.ID).Scan(&b.AccountCount, &b.ActiveCount, &
 
 func (s *Store) UpdateBatch(id, name, note string) error {
 	_, err := s.db.Exec(`UPDATE batches SET name = ?, note = ? WHERE id = ?`, name, note, id)
+	if err == nil {
+		s.accountVersion.Add(1)
+	}
 	return err
 }
 
@@ -292,7 +331,11 @@ func (s *Store) DeleteBatch(id string) error {
 	if _, err := tx.Exec(`DELETE FROM batches WHERE id = ?`, id); err != nil {
 		return err
 	}
-	return tx.Commit()
+	err = tx.Commit()
+	if err == nil {
+		s.accountVersion.Add(1)
+	}
+	return err
 }
 
 func (s *Store) InsertAccount(a *models.Account) error {
@@ -310,16 +353,22 @@ INSERT INTO accounts(
 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.BatchID, a.Email, a.Name, a.RefreshToken, a.AccessToken, a.ExpiresIn, a.ExpiryTimestamp,
 		a.ProjectID, a.SubscriptionTier, string(quotaJSON), boolToInt(a.Disabled), a.DisabledReason, a.LastUsed, a.LastError, a.RateLimitedUntil, a.CreatedAt)
+	if err == nil {
+		s.accountVersion.Add(1)
+	}
 	return err
 }
 
 func (s *Store) HasRefreshToken(token string) bool {
 	var n int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM accounts WHERE refresh_token = ?`, token).Scan(&n)
+	_ = s.readDB.QueryRow(`SELECT COUNT(*) FROM accounts WHERE refresh_token = ?`, token).Scan(&n)
 	return n > 0
 }
 
 func (s *Store) ListAccounts(batchID string) ([]models.Account, error) {
+	return s.ListAccountsContext(context.Background(), batchID)
+}
+func (s *Store) ListAccountsContext(ctx context.Context, batchID string) ([]models.Account, error) {
 	q := `
 SELECT a.id, a.batch_id, b.name, a.email, a.name, a.refresh_token, a.access_token, a.expires_in, a.expiry_timestamp,
        a.project_id, a.subscription_tier, a.quota_json, a.disabled, a.disabled_reason, a.last_used, a.last_error,
@@ -331,7 +380,7 @@ FROM accounts a JOIN batches b ON a.batch_id = b.id`
 		args = append(args, batchID)
 	}
 	q += ` ORDER BY a.created_at DESC`
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +399,10 @@ FROM accounts a JOIN batches b ON a.batch_id = b.id`
 }
 
 func (s *Store) GetAccount(id string) (*models.Account, error) {
-	row := s.db.QueryRow(`
+	return s.GetAccountContext(context.Background(), id)
+}
+func (s *Store) GetAccountContext(ctx context.Context, id string) (*models.Account, error) {
+	row := s.readDB.QueryRowContext(ctx, `
 SELECT a.id, a.batch_id, b.name, a.email, a.name, a.refresh_token, a.access_token, a.expires_in, a.expiry_timestamp,
        a.project_id, a.subscription_tier, a.quota_json, a.disabled, a.disabled_reason, a.last_used, a.last_error,
        a.rate_limited_until, a.created_at, b.expires_at
@@ -372,87 +424,34 @@ UPDATE accounts SET
 WHERE id=?`,
 		a.Email, a.Name, a.AccessToken, a.ExpiresIn, a.ExpiryTimestamp, a.ProjectID, a.SubscriptionTier,
 		string(quotaJSON), boolToInt(a.Disabled), a.DisabledReason, a.LastUsed, a.LastError, a.RateLimitedUntil, a.ID)
+	if err == nil {
+		s.accountVersion.Add(1)
+	}
 	return err
 }
 
 func (s *Store) DeleteAccount(id string) error {
 	_, err := s.db.Exec(`DELETE FROM accounts WHERE id = ?`, id)
+	if err == nil {
+		s.accountVersion.Add(1)
+	}
 	return err
 }
 
 func (s *Store) SetDisabled(id string, disabled bool, reason string) error {
 	_, err := s.db.Exec(`UPDATE accounts SET disabled=?, disabled_reason=? WHERE id=?`, boolToInt(disabled), reason, id)
-	return err
-}
-
-func (s *Store) MarkUsed(id string) error {
-	_, err := s.db.Exec(`UPDATE accounts SET last_used=? WHERE id=?`, time.Now().Unix(), id)
+	if err == nil {
+		s.accountVersion.Add(1)
+	}
 	return err
 }
 
 func (s *Store) MarkRateLimited(id string, until int64, errMsg string) error {
 	_, err := s.db.Exec(`UPDATE accounts SET rate_limited_until=?, last_error=? WHERE id=?`, until, errMsg, id)
+	if err == nil {
+		s.accountVersion.Add(1)
+	}
 	return err
-}
-
-func (s *Store) PickAccount(skipExpired bool, exclude map[string]struct{}) (*models.Account, error) {
-	now := time.Now().Unix()
-	q := `
-SELECT a.id, a.batch_id, b.name, a.email, a.name, a.refresh_token, a.access_token, a.expires_in, a.expiry_timestamp,
-       a.project_id, a.subscription_tier, a.quota_json, a.disabled, a.disabled_reason, a.last_used, a.last_error,
-       a.rate_limited_until, a.created_at, b.expires_at
-FROM accounts a JOIN batches b ON a.batch_id = b.id
-WHERE a.disabled = 0`
-	args := []any{}
-	if skipExpired {
-		q += ` AND b.expires_at > ?`
-		args = append(args, now)
-	}
-	if len(exclude) > 0 {
-		q += ` AND a.id NOT IN (`
-		i := 0
-		for id := range exclude {
-			if i > 0 {
-				q += `,`
-			}
-			q += `?`
-			args = append(args, id)
-			i++
-		}
-		q += `)`
-	}
-	q += ` ORDER BY a.last_used ASC, a.created_at ASC LIMIT 1`
-	a, err := scanAccount(s.db.QueryRow(q, args...))
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("no available accounts")
-		}
-		return nil, err
-	}
-	decorateAccount(&a, time.Now())
-	_ = s.MarkUsed(a.ID)
-	a.LastUsed = now
-	return &a, nil
-}
-
-func (s *Store) AddLog(l models.RequestLog) error {
-	if l.CreatedAt == 0 {
-		l.CreatedAt = time.Now().Unix()
-	}
-	select {
-	case s.logCh <- l:
-	default:
-	}
-	return nil
-}
-
-func (s *Store) logWorker() {
-	for l := range s.logCh {
-		_, _ = s.db.Exec(`
-INSERT INTO request_logs(created_at, protocol, model, mapped_model, account_id, account_email, status, stream, latency_ms, error, mixed, ttft_ms, input_tokens, output_tokens, cache_tokens, reasoning_tokens, tps)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			l.CreatedAt, l.Protocol, l.Model, l.MappedModel, l.AccountID, l.AccountEmail, l.Status, boolToInt(l.Stream), l.LatencyMS, l.Error, boolToInt(l.Mixed), l.TTFTMS, l.InputTokens, l.OutputTokens, l.CacheTokens, l.ReasoningTokens, l.TPS)
-	}
 }
 
 func (s *Store) TrimLogs(keep int) {
@@ -502,7 +501,7 @@ func (s *Store) LogOverview(q, protocol string, onlyErr bool) (models.LogOvervie
 	var ov models.LogOverview
 	where, args := logWhere(q, protocol, onlyErr)
 	var ok, bad, in, out, cache, think sql.NullInt64
-	err := s.db.QueryRow(`
+	err := s.readDB.QueryRow(`
 SELECT COUNT(*),
        SUM(CASE WHEN status < 400 THEN 1 ELSE 0 END),
        SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
@@ -547,7 +546,7 @@ func (s *Store) ListLogs(limit, offset int, q, protocol string, onlyErr bool) ([
 	}
 	where, args := logWhere(q, protocol, onlyErr)
 	args = append(args, limit, offset)
-	rows, err := s.db.Query(logSelect+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, args...)
+	rows, err := s.readDB.Query(logSelect+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -565,7 +564,7 @@ func (s *Store) ListAccountLogs(accountID string, limit, offset int) ([]models.R
 	if offset < 0 {
 		offset = 0
 	}
-	rows, err := s.db.Query(logSelect+` WHERE account_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`, accountID, limit, offset)
+	rows, err := s.readDB.Query(logSelect+` WHERE account_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`, accountID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -591,7 +590,7 @@ func scanLogs(rows *sql.Rows) ([]models.RequestLog, error) {
 func (s *Store) AccountLogStats(accountID string) (total, success, errors int, avgLatency int64, err error) {
 	var ok, bad sql.NullInt64
 	var avg sql.NullFloat64
-	err = s.db.QueryRow(`
+	err = s.readDB.QueryRow(`
 SELECT COUNT(*),
        SUM(CASE WHEN status < 400 THEN 1 ELSE 0 END),
        SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
@@ -690,14 +689,14 @@ func modelFamily(name string) string {
 func (s *Store) DashboardStats(rangeKey string) (*models.Dashboard, error) {
 	now := time.Now()
 	d := &models.Dashboard{Range: normalizeRange(rangeKey), UpdatedAt: now.Unix()}
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM batches`).Scan(&d.TotalBatches)
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM accounts`).Scan(&d.TotalAccounts)
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM accounts WHERE disabled = 1`).Scan(&d.DisabledAccounts)
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM accounts WHERE rate_limited_until > ?`, now.Unix()).Scan(&d.RateLimited)
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM request_logs WHERE created_at >= ?`, now.Add(-24*time.Hour).Unix()).Scan(&d.Requests24h)
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM request_logs WHERE created_at >= ? AND status >= 400`, now.Add(-24*time.Hour).Unix()).Scan(&d.Errors24h)
+	_ = s.readDB.QueryRow(`SELECT COUNT(*) FROM batches`).Scan(&d.TotalBatches)
+	_ = s.readDB.QueryRow(`SELECT COUNT(*) FROM accounts`).Scan(&d.TotalAccounts)
+	_ = s.readDB.QueryRow(`SELECT COUNT(*) FROM accounts WHERE disabled = 1`).Scan(&d.DisabledAccounts)
+	_ = s.readDB.QueryRow(`SELECT COUNT(*) FROM accounts WHERE rate_limited_until > ?`, now.Unix()).Scan(&d.RateLimited)
+	_ = s.readDB.QueryRow(`SELECT COUNT(*) FROM request_logs WHERE created_at >= ?`, now.Add(-24*time.Hour).Unix()).Scan(&d.Requests24h)
+	_ = s.readDB.QueryRow(`SELECT COUNT(*) FROM request_logs WHERE created_at >= ? AND status >= 400`, now.Add(-24*time.Hour).Unix()).Scan(&d.Errors24h)
 
-	rows, err := s.db.Query(`
+	rows, err := s.readDB.Query(`
 SELECT a.disabled, b.expires_at FROM accounts a JOIN batches b ON a.batch_id = b.id`)
 	if err != nil {
 		return d, err
@@ -724,7 +723,7 @@ SELECT a.disabled, b.expires_at FROM accounts a JOIN batches b ON a.batch_id = b
 	from, hourly, nBuckets := rangeStart(d.Range, now)
 	var avg sql.NullFloat64
 	var stream, errs sql.NullInt64
-	_ = s.db.QueryRow(`
+	_ = s.readDB.QueryRow(`
 SELECT COUNT(*), SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), AVG(latency_ms), SUM(stream)
 FROM request_logs WHERE created_at >= ?`, from).Scan(&d.Requests, &errs, &avg, &stream)
 	if errs.Valid {
@@ -742,7 +741,7 @@ FROM request_logs WHERE created_at >= ?`, from).Scan(&d.Requests, &errs, &avg, &
 	if hourly {
 		bucketSQL = `strftime('%Y-%m-%d %H:00', created_at, 'unixepoch', '+8 hours')`
 	}
-	trendRows, err := s.db.Query(`
+	trendRows, err := s.readDB.Query(`
 SELECT `+bucketSQL+` AS bucket, COUNT(*), SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), AVG(latency_ms)
 FROM request_logs WHERE created_at >= ?
 GROUP BY bucket ORDER BY bucket`, from)
@@ -793,7 +792,7 @@ GROUP BY bucket ORDER BY bucket`, from)
 		d.Trend = append(d.Trend, p)
 	}
 
-	kindRows, err := s.db.Query(`
+	kindRows, err := s.readDB.Query(`
 SELECT COALESCE(NULLIF(mapped_model, ''), NULLIF(model, ''), ''), COUNT(*), SUM(CASE WHEN status < 400 THEN 1 ELSE 0 END)
 FROM request_logs WHERE created_at >= ?
 GROUP BY 1`, from)
@@ -834,7 +833,7 @@ GROUP BY 1`, from)
 		d.Protocols = append(d.Protocols, st)
 	}
 
-	modelRows, err := s.db.Query(`
+	modelRows, err := s.readDB.Query(`
 SELECT COALESCE(NULLIF(mapped_model, ''), NULLIF(model, ''), 'unknown') AS name,
        COUNT(*), SUM(CASE WHEN status < 400 THEN 1 ELSE 0 END), AVG(latency_ms)
 FROM request_logs WHERE created_at >= ?
@@ -863,7 +862,7 @@ GROUP BY name ORDER BY COUNT(*) DESC LIMIT 10`, from)
 
 	heatDays := 140
 	heatFrom := cstDate(now.Unix()).AddDate(0, 0, -(heatDays - 1))
-	heatRows, err := s.db.Query(`
+	heatRows, err := s.readDB.Query(`
 SELECT strftime('%Y-%m-%d', created_at, 'unixepoch', '+8 hours') AS d, COUNT(*)
 FROM request_logs WHERE created_at >= ?
 GROUP BY d`, heatFrom.Unix())
@@ -901,7 +900,7 @@ GROUP BY d`, heatFrom.Unix())
 }
 
 func (s *Store) OfficialModels() ([]models.ModelQuota, map[string]string, error) {
-	rows, err := s.db.Query(`SELECT quota_json FROM accounts WHERE quota_json IS NOT NULL AND quota_json != '' AND quota_json != 'null'`)
+	rows, err := s.readDB.Query(`SELECT quota_json FROM accounts WHERE quota_json IS NOT NULL AND quota_json != '' AND quota_json != 'null'`)
 	if err != nil {
 		return nil, nil, err
 	}

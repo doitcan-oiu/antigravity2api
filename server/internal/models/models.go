@@ -19,28 +19,30 @@ type Batch struct {
 }
 
 type Account struct {
-	ID               string     `json:"id"`
-	BatchID          string     `json:"batch_id"`
-	BatchName        string     `json:"batch_name,omitempty"`
-	Email            string     `json:"email"`
-	Name             string     `json:"name,omitempty"`
-	RefreshToken     string     `json:"refresh_token,omitempty"`
-	AccessToken      string     `json:"-"`
-	ExpiresIn        int64      `json:"expires_in"`
-	ExpiryTimestamp  int64      `json:"expiry_timestamp"`
-	ProjectID        string     `json:"project_id,omitempty"`
-	SubscriptionTier string     `json:"subscription_tier,omitempty"`
-	Quota            *QuotaData `json:"quota,omitempty"`
-	Disabled         bool       `json:"disabled"`
-	DisabledReason   string     `json:"disabled_reason,omitempty"`
-	LastUsed         int64      `json:"last_used"`
-	LastError        string     `json:"last_error,omitempty"`
-	RateLimitedUntil int64      `json:"rate_limited_until,omitempty"`
-	CreatedAt        int64      `json:"created_at"`
-	ExpiresAt        int64      `json:"expires_at"`
-	RemainingDays    int        `json:"remaining_days"`
-	Expired          bool       `json:"expired"`
-	Status           string     `json:"status"`
+	ID               string           `json:"id"`
+	BatchID          string           `json:"batch_id"`
+	BatchName        string           `json:"batch_name,omitempty"`
+	Email            string           `json:"email"`
+	Name             string           `json:"name,omitempty"`
+	RefreshToken     string           `json:"refresh_token,omitempty"`
+	AccessToken      string           `json:"-"`
+	ExpiresIn        int64            `json:"expires_in"`
+	ExpiryTimestamp  int64            `json:"expiry_timestamp"`
+	ProjectID        string           `json:"project_id,omitempty"`
+	SubscriptionTier string           `json:"subscription_tier,omitempty"`
+	Quota            *QuotaData       `json:"quota,omitempty"`
+	Disabled         bool             `json:"disabled"`
+	DisabledReason   string           `json:"disabled_reason,omitempty"`
+	LastUsed         int64            `json:"last_used"`
+	LastError        string           `json:"last_error,omitempty"`
+	RateLimitedUntil int64            `json:"rate_limited_until,omitempty"`
+	InFlight         int              `json:"in_flight"`
+	ModelCooldowns   map[string]int64 `json:"model_cooldowns,omitempty"`
+	CreatedAt        int64            `json:"created_at"`
+	ExpiresAt        int64            `json:"expires_at"`
+	RemainingDays    int              `json:"remaining_days"`
+	Expired          bool             `json:"expired"`
+	Status           string           `json:"status"`
 }
 
 type QuotaData struct {

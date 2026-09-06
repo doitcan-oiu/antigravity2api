@@ -98,6 +98,8 @@ export type Account = {
   last_used: number;
   last_error?: string;
   rate_limited_until?: number;
+  in_flight?: number;
+  model_cooldowns?: Record<string, number>;
   created_at: number;
   expires_at: number;
   remaining_days: number;
