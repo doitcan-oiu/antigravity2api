@@ -123,6 +123,30 @@ button, input, textarea, select { font-family: inherit; }
   font-weight: 500;
   line-height: 1.5;
   padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.promo-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: #d8f5e6;
+  box-shadow: 0 0 0 4px rgba(255,255,255,0.16);
+  flex: none;
+}
+.file-pick {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--steel);
+  cursor: pointer;
+}
+.file-pick input {
+  display: none;
 }
 
 .topnav {
@@ -477,6 +501,38 @@ button, input, textarea, select { font-family: inherit; }
 }
 .setting-copy { min-width: 0; flex: 1; }
 .setting-title { font-size: 16px; font-weight: 600; }
+.about-panel { display: grid; gap: 20px; }
+.about-hero {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+.about-hero .mark { width: 40px; height: 40px; border-radius: 12px; font-size: 18px; }
+.about-hero h2 { margin: 0; font-size: 20px; }
+.about-hero p { margin: 6px 0 0; color: var(--steel); font-size: 14px; }
+.about-meta { display: grid; }
+.about-row {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 14px 0;
+  border-top: 1px solid var(--hairline);
+  font-size: 14px;
+  min-width: 0;
+}
+.about-row span { color: var(--steel); }
+.about-row strong { font-weight: 600; }
+.about-row a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--ink);
+  min-width: 0;
+}
+.about-github { width: fit-content; display: inline-flex; align-items: center; gap: 8px; }
+
 .setting-desc { font-size: 14px; color: var(--steel); margin-top: 4px; }
 
 .route-actions { display: flex; gap: 8px; }

@@ -75,6 +75,8 @@ func (s *Server) Router() http.Handler {
 		r.Get("/batches", s.listBatches)
 		r.Post("/batches", s.createBatchImport)
 		r.Get("/batches/{id}", s.getBatch)
+		r.Get("/batches/{id}/export", s.exportBatch)
+		r.Post("/batches/{id}/import", s.importIntoBatch)
 		r.Patch("/batches/{id}", s.updateBatch)
 		r.Delete("/batches/{id}", s.deleteBatch)
 		r.Get("/accounts", s.listAccounts)

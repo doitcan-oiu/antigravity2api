@@ -39,6 +39,23 @@ export default function Batches() {
     }
   }
 
+  async function exportBatch(batch: Batch) {
+    try {
+      const data = await api<Record<string, unknown>>(`/api/batches/${batch.id}/export`);
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const safe = (batch.name || "batch").replace(/[\\/:*?"<>|]/g, "_");
+      a.href = url;
+      a.download = `${safe}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      notifySuccess("批次已导出");
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : "导出失败");
+    }
+  }
+
   const counts = useMemo(() => {
     const expired = items.filter((b) => b.expired);
     const soon = items.filter((b) => !b.expired && b.remaining_days <= 5);
@@ -69,7 +86,7 @@ export default function Batches() {
       <header className="dash-head">
         <h1>批次</h1>
         <button className="btn btn-primary" onClick={() => nav("/import")}>
-          + 导入新批次
+          + 创建批次
         </button>
       </header>
       {err ? <p className="err">{err}</p> : null}
@@ -113,10 +130,10 @@ export default function Batches() {
           <div className="promo-cta">
             <div>
               <h2>还没有批次</h2>
-              <p>导入账号时可以选择购买日期，到期按购买后 30 天计算。</p>
+              <p>创建批次时可选择购买日期，到期按购买后 30 天计算。已有导出文件也可以直接导入。</p>
             </div>
             <button className="btn btn-on-dark" onClick={() => nav("/import")}>
-              导入批次
+              创建批次
             </button>
           </div>
         ) : (
@@ -158,6 +175,12 @@ export default function Batches() {
                 <div className="row-actions">
                   <button className="btn btn-primary btn-sm" onClick={() => nav(`/accounts?batch=${b.id}`)}>
                     查看账号
+                  </button>
+                  <button className="btn btn-tertiary btn-sm" onClick={() => nav(`/import?batch=${b.id}`)}>
+                    导入
+                  </button>
+                  <button className="btn btn-tertiary btn-sm" onClick={() => exportBatch(b)}>
+                    导出
                   </button>
                   <button className="btn btn-secondary btn-sm" onClick={() => remove(b.id)}>
                     删除

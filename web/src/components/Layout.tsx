@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { Menu, X } from "lucide-react";
-import { clearToken } from "../lib/api";
+import { api, clearToken } from "../lib/api";
+import type { Settings } from "../lib/types";
 
 const groups = [
   {
@@ -10,7 +11,7 @@ const groups = [
       { to: "/", label: "仪表盘" },
       { to: "/batches", label: "批次" },
       { to: "/accounts", label: "账号" },
-      { to: "/import", label: "导入" },
+      { to: "/import", label: "创建批次" },
     ],
   },
   {
@@ -18,7 +19,13 @@ const groups = [
     items: [
       { to: "/routes", label: "模型路由" },
       { to: "/monitor", label: "监控" },
+    ],
+  },
+  {
+    title: "系统",
+    items: [
       { to: "/settings", label: "设置" },
+      { to: "/about", label: "关于" },
     ],
   },
 ];
@@ -32,13 +39,36 @@ export function Wordmark() {
   );
 }
 
+function formatListen(addr?: string) {
+  const v = (addr || "").trim();
+  if (!v) return "本地";
+  if (v.startsWith(":")) return `0.0.0.0${v}`;
+  return v;
+}
+
 export default function Layout() {
   const navTo = useNavigate();
   const [open, setOpen] = useState(false);
+  const [listen, setListen] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    api<Settings>("/api/settings")
+      .then((s) => {
+        if (!cancelled) setListen(s.listen_addr || "");
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <div className="shell">
-      <div className="promo">同一批导入的账号共享 30 天有效期，到期后会明确标记并从代理池剔除。</div>
+      <div className="promo">
+        <span className="promo-dot" />
+        正在 {formatListen(listen)} 运行中
+      </div>
       <header className="topnav">
         <button className="menu-btn btn btn-icon" onClick={() => setOpen(true)} aria-label="打开菜单">
           <Menu size={18} />
@@ -47,7 +77,7 @@ export default function Layout() {
         <div className="topnav-spacer" />
         <div className="topnav-actions">
           <button className="btn btn-primary" onClick={() => navTo("/import")}>
-            导入批次
+            创建批次
           </button>
           <button
             className="btn btn-tertiary"
@@ -83,28 +113,6 @@ export default function Layout() {
           <Outlet />
         </main>
       </div>
-      <footer className="footer">
-        <div>
-          <Wordmark />
-          <p style={{ marginTop: 16, maxWidth: 360 }}>从 Antigravity 抽出的独立反代。把客户端指过来，账号池会自动轮换。</p>
-        </div>
-        <div>
-          <h4>接入</h4>
-          <ul>
-            <li>OpenAI · /v1</li>
-            <li>Claude · /v1/messages</li>
-            <li>Gemini · /v1beta</li>
-          </ul>
-        </div>
-        <div>
-          <h4>批次</h4>
-          <ul>
-            <li>默认有效期 30 天</li>
-            <li>过期账号不再调度</li>
-            <li>429 自动换号重试</li>
-          </ul>
-        </div>
-      </footer>
     </div>
   );
 }

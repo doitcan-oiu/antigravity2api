@@ -52,6 +52,22 @@ func (p *Pool) Import(name, note, raw string, purchasedAt time.Time) (*models.Im
 	if err != nil {
 		return nil, err
 	}
+	return p.importTokens(batch, tokens)
+}
+
+func (p *Pool) ImportInto(batchID, raw string) (*models.ImportResult, error) {
+	batch, err := p.store.GetBatch(batchID)
+	if err != nil {
+		return nil, fmt.Errorf("批次不存在")
+	}
+	tokens := oauth.ExtractTokens(raw)
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("未找到有效 refresh_token（需以 1// 开头）")
+	}
+	return p.importTokens(batch, tokens)
+}
+
+func (p *Pool) importTokens(batch *models.Batch, tokens []string) (*models.ImportResult, error) {
 	res := &models.ImportResult{Batch: batch}
 	var (
 		mu          sync.Mutex

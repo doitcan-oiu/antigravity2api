@@ -207,8 +207,8 @@ export default function Accounts() {
     <div>
       <header className="dash-head">
         <h1>{batch ? "批次账号" : "账号"}</h1>
-        <button className="btn btn-primary" onClick={() => nav("/import")}>
-          + 导入批次
+        <button className="btn btn-primary" onClick={() => nav(batch ? `/import?batch=${batch}` : "/import")}>
+          {batch ? "+ 导入账号" : "+ 创建批次"}
         </button>
       </header>
       {err ? <p className="err">{err}</p> : null}

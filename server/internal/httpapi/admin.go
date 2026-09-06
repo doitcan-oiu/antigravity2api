@@ -165,6 +165,63 @@ func (s *Server) deleteBatch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
+func (s *Server) exportBatch(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	b, err := s.store.GetBatch(id)
+	if err != nil {
+		writeJSON(w, 404, map[string]any{"error": "batch not found"})
+		return
+	}
+	accs, err := s.store.ListAccounts(id)
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	accounts := make([]map[string]any, 0, len(accs))
+	for _, a := range accs {
+		accounts = append(accounts, map[string]any{
+			"email":             a.Email,
+			"name":              a.Name,
+			"refresh_token":     a.RefreshToken,
+			"disabled":          a.Disabled,
+			"subscription_tier": a.SubscriptionTier,
+		})
+	}
+	purchased := ""
+	if b.PurchasedAt > 0 {
+		purchased = time.Unix(b.PurchasedAt, 0).In(time.FixedZone("CST", 8*3600)).Format("2006-01-02")
+	}
+	writeJSON(w, 200, map[string]any{
+		"app":         "antigravity2api",
+		"exported_at": time.Now().Unix(),
+		"batch": map[string]any{
+			"id":           b.ID,
+			"name":         b.Name,
+			"note":         b.Note,
+			"purchased_at": purchased,
+			"expires_at":   b.ExpiresAt,
+		},
+		"accounts": accounts,
+	})
+}
+
+func (s *Server) importIntoBatch(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var body struct {
+		Raw string `json:"raw"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	res, err := s.pool.ImportInto(id, body.Raw)
+	if err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, res)
+}
+
 func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 	batchID := r.URL.Query().Get("batch_id")
 	list, err := s.store.ListAccounts(batchID)

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { notifyError, notifySuccess } from "../lib/notify";
-import type { ImportResult, Settings } from "../lib/types";
+import type { Batch, ImportResult, Settings } from "../lib/types";
 import { PageHeader, RemainChip } from "../components/StatusChip";
 
 function todayISO() {
@@ -18,7 +19,26 @@ function plusDays(iso: string, days: number) {
   return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`;
 }
 
+function applyExportMeta(text: string, intoExisting: boolean, setName: (v: string) => void, setNote: (v: string) => void, setPurchasedAt: (v: string) => void) {
+  if (intoExisting) return;
+  try {
+    const parsed = JSON.parse(text);
+    const batch = parsed?.batch;
+    if (!batch || typeof batch !== "object") return;
+    if (typeof batch.name === "string" && batch.name.trim()) setName(batch.name);
+    if (typeof batch.note === "string") setNote(batch.note);
+    if (typeof batch.purchased_at === "string" && /^\d{4}-\d{2}-\d{2}$/.test(batch.purchased_at)) {
+      setPurchasedAt(batch.purchased_at);
+    }
+  } catch {
+    // plain token list
+  }
+}
+
 export default function ImportPage() {
+  const [params] = useSearchParams();
+  const batchID = params.get("batch") || "";
+  const [target, setTarget] = useState<Batch | null>(null);
   const [name, setName] = useState("");
   const [note, setNote] = useState("");
   const [raw, setRaw] = useState("");
@@ -36,17 +56,51 @@ export default function ImportPage() {
       .catch(() => {});
   }, []);
 
+  useEffect(() => {
+    setResult(null);
+    setRaw("");
+    setErr("");
+    if (!batchID) {
+      setTarget(null);
+      return;
+    }
+    let cancelled = false;
+    api<{ batch: Batch }>(`/api/batches/${batchID}`)
+      .then((data) => {
+        if (!cancelled) setTarget(data.batch);
+      })
+      .catch((e) => {
+        if (!cancelled) setErr(e instanceof Error ? e.message : "批次不存在");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [batchID]);
+
   const expiresOn = useMemo(() => plusDays(purchasedAt, days), [purchasedAt, days]);
+  const intoExisting = Boolean(batchID);
+
+  async function onPickFile(file?: File) {
+    if (!file) return;
+    const text = await file.text();
+    setRaw(text);
+    applyExportMeta(text, intoExisting, setName, setNote, setPurchasedAt);
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setPending(true);
     setErr("");
     try {
-      const res = await api<ImportResult>("/api/batches", {
-        method: "POST",
-        body: JSON.stringify({ name, note, raw, purchased_at: purchasedAt }),
-      });
+      const res = intoExisting
+        ? await api<ImportResult>(`/api/batches/${batchID}/import`, {
+            method: "POST",
+            body: JSON.stringify({ raw }),
+          })
+        : await api<ImportResult>("/api/batches", {
+            method: "POST",
+            body: JSON.stringify({ name, note, raw, purchased_at: purchasedAt }),
+          });
       setResult(res);
       setRaw("");
       notifySuccess(`导入完成，成功 ${res.imported} 个`);
@@ -63,34 +117,42 @@ export default function ImportPage() {
     <div>
       <PageHeader
         kicker="账号池"
-        title="导入批次"
-        description="选择购买日期，到期时间按购买日后的有效天数自动计算。"
+        title={intoExisting ? "导入账号" : "创建批次"}
+        description={
+          intoExisting
+            ? `把账号导入到「${target?.name || "当前批次"}」，不会改到期时间。`
+            : "选择购买日期，到期时间按购买日后的有效天数自动计算。也可导入之前导出的 JSON。"
+        }
       />
       <form className="panel" onSubmit={submit}>
-        <h2>批量导入</h2>
+        <h2>{intoExisting ? "导入到已有批次" : "批量导入"}</h2>
         <p className="muted" style={{ margin: "0 0 24px", fontSize: 14 }}>
-          支持 JSON 数组、每行一个 token，或从文本里自动提取 1// 开头的 refresh_token。
+          支持导出的 JSON、账号数组、每行一个 token，或从文本里自动提取 1// 开头的 refresh_token。
         </p>
-        <div className="grid-2" style={{ marginBottom: 16 }}>
-          <div className="field">
-            <label htmlFor="name">批次名称</label>
-            <input id="name" value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：9 月第一批" />
-          </div>
-          <div className="field">
-            <label htmlFor="note">备注</label>
-            <input id="note" value={note} onChange={(e) => setNote(e.target.value)} placeholder="可选" />
-          </div>
-        </div>
-        <div className="grid-2" style={{ marginBottom: 16 }}>
-          <div className="field">
-            <label htmlFor="bought">购买时间</label>
-            <input id="bought" type="date" value={purchasedAt} onChange={(e) => setPurchasedAt(e.target.value)} />
-          </div>
-          <div className="field">
-            <label>到期时间</label>
-            <input value={expiresOn ? `${expiresOn}（购买后 ${days} 天）` : ""} readOnly />
-          </div>
-        </div>
+        {intoExisting ? null : (
+          <>
+            <div className="grid-2" style={{ marginBottom: 16 }}>
+              <div className="field">
+                <label htmlFor="name">批次名称</label>
+                <input id="name" value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：9 月第一批" />
+              </div>
+              <div className="field">
+                <label htmlFor="note">备注</label>
+                <input id="note" value={note} onChange={(e) => setNote(e.target.value)} placeholder="可选" />
+              </div>
+            </div>
+            <div className="grid-2" style={{ marginBottom: 16 }}>
+              <div className="field">
+                <label htmlFor="bought">购买时间</label>
+                <input id="bought" type="date" value={purchasedAt} onChange={(e) => setPurchasedAt(e.target.value)} />
+              </div>
+              <div className="field">
+                <label>到期时间</label>
+                <input value={expiresOn ? `${expiresOn}（购买后 ${days} 天）` : ""} readOnly />
+              </div>
+            </div>
+          </>
+        )}
         <div className="field">
           <label htmlFor="raw">账号内容</label>
           <textarea
@@ -100,9 +162,21 @@ export default function ImportPage() {
             placeholder={'[{"refresh_token":"1//xxxx"}]\n或每行一个 1// token'}
           />
         </div>
+        <label className="file-pick">
+          选择导出文件
+          <input
+            type="file"
+            accept=".json,.txt,.csv,application/json,text/plain"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              e.target.value = "";
+              void onPickFile(file);
+            }}
+          />
+        </label>
         {err ? <p className="err">{err}</p> : null}
         <button className="btn btn-primary" style={{ marginTop: 20 }} disabled={pending} type="submit">
-          {pending ? "正在导入…" : "导入并创建批次"}
+          {pending ? "正在导入…" : intoExisting ? "导入账号" : "创建批次"}
         </button>
       </form>
       {result ? (

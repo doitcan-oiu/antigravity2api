@@ -9,6 +9,7 @@ import ImportPage from "./pages/Import";
 import Monitor from "./pages/Monitor";
 import SettingsPage from "./pages/Settings";
 import Routing from "./pages/Routing";
+import About from "./pages/About";
 
 function Guard({ children }: { children: React.ReactNode }) {
   if (!getToken()) return <Navigate to="/login" replace />;
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="routes" element={<Routing />} />
         <Route path="monitor" element={<Monitor />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="about" element={<About />} />
       </Route>
     </Routes>
   );
