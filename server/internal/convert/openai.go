@@ -220,6 +220,7 @@ func OpenAIToGeminiWithModel(req OpenAIRequest, projectID, email, accountID, fin
 	}
 	setStop(gen, req.Stop)
 	applyThinking(gen, mapped, thinking, effort)
+	applyVariantGeneration(gen, req.Model, mapped)
 	format := AsMap(req.ResponseFormat)
 	if format == nil {
 		format = AsMap(GetPath(req.Text, "format"))

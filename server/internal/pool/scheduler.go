@@ -398,20 +398,29 @@ func (p *Pool) Acquire(ctx context.Context, model, sessionID string, exclude map
 		err = p.loadSnapshot(ctx)
 		p.mu.Lock()
 		valid := false
+		cooling := false
 		if err == nil {
 			if i, ok := p.accountIndex[acc.ID]; ok {
 				a := &p.accounts[i]
-				eligible := p.modelViewLocked(model)[i].available(time.Now())
-				valid = !a.Disabled && (a.Quota == nil || !a.Quota.IsForbidden) && (!p.SkipExpired() || a.ExpiresAt > time.Now().Unix()) && eligible
+				now := time.Now()
+				candidate := p.modelViewLocked(model)[i]
+				valid = !a.Disabled && (a.Quota == nil || !a.Quota.IsForbidden) && (!p.SkipExpired() || a.ExpiresAt > now.Unix()) && candidate.available(now)
+				// Another request may have observed a 429 while credentials were
+				// refreshing. Recheck both limit scopes before returning this slot.
+				cooling = p.limitedUntilLocked(a.ID, candidate.mapped).After(now) || a.RateLimitedUntil > now.Unix()
 			}
 		}
 		p.mu.Unlock()
-		if !valid {
+		if !valid || cooling {
 			release()
 			if err != nil {
 				return nil, nil, err
 			}
-			excluded[acc.ID] = struct{}{}
+			if !valid {
+				excluded[acc.ID] = struct{}{}
+			}
+			// Keep a cooling account visible to selection so an exhausted pool
+			// reports its RetryAfter instead of treating it as permanently absent.
 			continue
 		}
 		if err := ctx.Err(); err != nil {

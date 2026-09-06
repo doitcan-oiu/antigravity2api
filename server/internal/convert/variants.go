@@ -11,7 +11,8 @@ type ModelResolution struct {
 }
 
 // ResolveModel resolves client aliases before account-specific availability is
-// considered. Explicit physical model IDs remain usable without tier inference.
+// considered. Some legacy IDs are also tier aliases in the demo; WithModel
+// bypasses this step once account selection has produced a physical model ID.
 func ResolveModel(model string, budget *int, effort string) ModelResolution {
 	key := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(model), "models/"))
 	key = strings.TrimSuffix(key, "-online")
@@ -46,9 +47,22 @@ func ResolveModel(model string, budget *int, effort string) ModelResolution {
 		default:
 			mapped = "gemini-3-flash-agent"
 		}
-	case "gemini-3.7-flash", "gemini-3.7-flash-tiered":
+	case "gemini-3.5-flash-medium":
+		variant = true
+		mapped = "gemini-3.5-flash-low"
+	case "gemini-3.5-flash-low":
+		variant = true
+		mapped = "gemini-3.5-flash-extra-low"
+	case "gemini-3.7-flash", "gemini-3.7-flash-tiered", "gemini-3.7-flash-high",
+		"gemini-3.6-flash", "gemini-3.6-flash-tiered", "gemini-3.6-flash-high":
 		variant = true
 		mapped = "gemini-3.7-flash-" + tier
+	case "gemini-3.7-flash-medium", "gemini-3.6-flash-medium":
+		variant = true
+		mapped = "gemini-3.7-flash-medium"
+	case "gemini-3.7-flash-low", "gemini-3.6-flash-low":
+		variant = true
+		mapped = "gemini-3.7-flash-low"
 	case "gemini-3.1-pro", "gemini-pro", "gemini-3.1-pro-high", "gemini-3-pro-high":
 		variant = true
 		if tier == "low" {
@@ -56,8 +70,33 @@ func ResolveModel(model string, budget *int, effort string) ModelResolution {
 		} else {
 			mapped = "gemini-pro-agent"
 		}
+	case "gemini-3.1-pro-low":
+		variant = true
+		mapped = key
 	}
 	return ModelResolution{Model: mapped, ThinkingBudget: DefaultThinkingBudget(mapped), MaxOutputTokens: MaxOutputTokens(mapped), IncludeThinking: IsThinkingModel(mapped), Variant: variant}
+}
+
+// Variant clients send budget magnitudes as tier hints. The demo replaces those
+// hints with calibrated parameters after resolving the tier. Use the final
+// account model here so deprecated-model forwarding cannot leave stale budgets.
+func applyVariantGeneration(gen map[string]any, requested, final string) {
+	if !ResolveModel(requested, nil, "").Variant {
+		return
+	}
+	switch strings.ToLower(final) {
+	case "gemini-3.7-flash-low", "gemini-3.7-flash-medium", "gemini-3.7-flash-high",
+		"gemini-3.6-flash-low", "gemini-3.6-flash-medium", "gemini-3.6-flash-high",
+		"gemini-3.5-flash-extra-low", "gemini-3.5-flash-low", "gemini-3-flash-agent",
+		"gemini-3.1-pro-low", "gemini-pro-agent":
+	default:
+		return
+	}
+	if !thinkingConfigEnabled(gen) {
+		return // Preserve an explicit disabled/none request.
+	}
+	gen["thinkingConfig"] = map[string]any{"includeThoughts": true, "thinkingBudget": DefaultThinkingBudget(final)}
+	gen["maxOutputTokens"] = MaxOutputTokens(final)
 }
 
 func requestModel(requested, final string, thinking *OpenAIThinking, effort string) string {

@@ -152,7 +152,7 @@ func (s *Server) Router() http.Handler {
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "antigravity2api"})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "antigravity2api", "proxy_revision": proxyRevision})
 }
 
 func (s *Server) adminAuth(next http.Handler) http.Handler {

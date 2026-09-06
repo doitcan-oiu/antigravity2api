@@ -2043,3 +2043,16 @@ button, input, textarea, select { font-family: inherit; }
 [data-slot="toast-region"] {
   z-index: 80 !important;
 }
+
+.log-error-details > summary { cursor: pointer; }
+.log-error-details[open] { position: relative; }
+.log-error-details[open] > summary { white-space: normal; overflow-wrap: anywhere; }
+.log-error-details pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 320px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 8px 0 0;
+}

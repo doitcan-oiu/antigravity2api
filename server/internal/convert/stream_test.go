@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -111,6 +112,80 @@ func TestWriteOpenAISSEPreservesThoughtOnly(t *testing.T) {
 }
 
 func testFrame(payload string) string { return "data: " + payload + "\n\n" }
+
+func TestUpstreamErrorRetainsGoogleRetryDetails(t *testing.T) {
+	const envelope = `{"error":{"code":429,"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"0.250s"},{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_EXCEEDED","domain":"googleapis.com","metadata":{"quota_limit":"GenerateRequestsPerMinute","quota_location":"global"}}],"opaqueCounter":9007199254740993},"requestId":"synthetic-request"}`
+	for _, wrapped := range []bool{false, true} {
+		payload := envelope
+		if wrapped {
+			payload = `{"response":` + payload + `}`
+		}
+		for _, phase := range []string{"prepare", "collect"} {
+			t.Run(fmt.Sprintf("%s/wrapped=%v", phase, wrapped), func(t *testing.T) {
+				input := testFrame(payload)
+				var err error
+				if phase == "prepare" {
+					_, err = PrepareGeminiStream(strings.NewReader(input))
+				} else {
+					input = testFrame(`{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}`) + input
+					var result []byte
+					result, err = CollectGeminiJSON(strings.NewReader(input))
+					if len(result) != 0 {
+						t.Fatalf("failed collection returned successful content: %s", result)
+					}
+				}
+				var upstream *UpstreamError
+				if !errors.As(err, &upstream) || upstream.Code != 429 || upstream.Type != "RESOURCE_EXHAUSTED" {
+					t.Fatalf("classified error=%#v (%v)", upstream, err)
+				}
+				if got := string(upstream.GetRaw()); got != envelope {
+					t.Fatalf("original error envelope changed: %s", got)
+				}
+				copy := upstream.GetRaw()
+				copy[0] = '!'
+				if string(upstream.GetRaw()) != envelope {
+					t.Fatal("GetRaw exposed the retained error buffer")
+				}
+			})
+		}
+	}
+}
+
+func TestUpstreamErrorOwnsAndBoundsRawBody(t *testing.T) {
+	data := []byte(`{"error":{"code":503,"message":"unavailable","details":[{"retryDelay":"1s"}]}}`)
+	_, err := decodeGeminiPayload(data)
+	var upstream *UpstreamError
+	if !errors.As(err, &upstream) {
+		t.Fatalf("error=%v", err)
+	}
+	want := string(data)
+	data[0] = '!'
+	if string(upstream.GetRaw()) != want {
+		t.Fatal("retained error aliased the decoder input")
+	}
+	oversized := &UpstreamError{}
+	oversized.retainRaw(make([]byte, MaxSSEEventBytes+1))
+	if len(oversized.GetRaw()) != 0 {
+		t.Fatal("retained an unbounded upstream error body")
+	}
+	var absent *UpstreamError
+	if absent.GetRaw() != nil {
+		t.Fatal("nil upstream error should have no body")
+	}
+}
+
+func TestPromptFeedbackErrorPreservesOriginalFeedback(t *testing.T) {
+	_, err := PrepareGeminiStream(strings.NewReader(testFrame(`{"response":{"promptFeedback":{"blockReason":"SAFETY","safetyRatings":[{"category":"HARM_CATEGORY_DANGEROUS_CONTENT","probability":"HIGH"}]}}}`)))
+	var upstream *UpstreamError
+	if !errors.As(err, &upstream) || upstream.Code != 400 {
+		t.Fatalf("error=%v", err)
+	}
+	raw := mustMap(upstream.GetRaw())
+	if AsMap(raw["error"])["type"] != "content_filter" || len(AsSlice(AsMap(raw["promptFeedback"])["safetyRatings"])) != 1 {
+		t.Fatalf("feedback was lost: %s", upstream.GetRaw())
+	}
+}
+
 func streamTestEvents(t *testing.T, output string) []map[string]any {
 	t.Helper()
 	var result []map[string]any

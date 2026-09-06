@@ -47,7 +47,12 @@ export function LogRow({ log }: { log: RequestLog }) {
           {log.status || "—"}
         </div>
         <div className="log-status-mode">{log.stream ? "流式" : "非流"}</div>
-        {log.error ? <div className="log-error" title={log.error}>{log.error}</div> : null}
+        {log.error ? (
+          <details className="log-error-details">
+            <summary className="log-error" title="展开完整错误">{log.error.split("\n")[0]}</summary>
+            <pre>{log.error}</pre>
+          </details>
+        ) : null}
       </div>
 
       <div className="log-perf">

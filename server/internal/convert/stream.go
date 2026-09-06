@@ -27,9 +27,36 @@ type UpstreamError struct {
 	Code    int
 	Message string
 	Type    string
+	raw     json.RawMessage
 }
 
 func (e *UpstreamError) Error() string { return e.Message }
+
+// GetRaw returns an owned copy of the complete JSON error envelope, including
+// Google error.details such as RetryInfo and ErrorInfo. A response.error is
+// normalized to its inner {"error": ...} envelope. Synthetic stream failures
+// have no upstream body. Retained bodies never exceed MaxSSEEventBytes.
+func (e *UpstreamError) GetRaw() json.RawMessage {
+	if e == nil {
+		return nil
+	}
+	return bytes.Clone(e.raw)
+}
+
+func (e *UpstreamError) retainRaw(raw []byte) {
+	if len(raw) <= MaxSSEEventBytes {
+		e.raw = bytes.Clone(raw)
+	}
+}
+
+func payloadFailure(code int, kind, message string, payload map[string]any) *UpstreamError {
+	e := &UpstreamError{Code: code, Type: kind, Message: message}
+	if raw, err := json.Marshal(payload); err == nil {
+		e.retainRaw(raw)
+	}
+	return e
+}
+
 func streamFailure(kind, message string) error {
 	return &UpstreamError{Code: 502, Type: kind, Message: message}
 }
@@ -42,10 +69,14 @@ func payloadError(payload map[string]any) error {
 			code = 502
 		}
 		message := firstNonEmpty(AsString(m["message"]), AsString(v), "upstream returned an error")
-		return &UpstreamError{Code: code, Type: firstNonEmpty(AsString(m["status"]), AsString(m["type"]), "upstream_error"), Message: message}
+		return payloadFailure(code, firstNonEmpty(AsString(m["status"]), AsString(m["type"]), "upstream_error"), message, payload)
 	}
 	if feedback := AsMap(payload["promptFeedback"]); AsString(feedback["blockReason"]) != "" {
-		return &UpstreamError{Code: 400, Type: "content_filter", Message: "upstream blocked prompt: " + AsString(feedback["blockReason"])}
+		message := "upstream blocked prompt: " + AsString(feedback["blockReason"])
+		return payloadFailure(400, "content_filter", message, map[string]any{
+			"error":          map[string]any{"code": 400, "type": "content_filter", "message": message},
+			"promptFeedback": feedback,
+		})
 	}
 	return nil
 }
@@ -89,12 +120,23 @@ func decodeGeminiPayload(data []byte) (map[string]any, error) {
 		return nil, streamFailure("invalid_response", "invalid upstream JSON event")
 	}
 	if err := payloadError(m); err != nil {
+		if upstream, ok := err.(*UpstreamError); ok && m["error"] != nil {
+			upstream.retainRaw(data)
+		}
 		return nil, err
 	}
 	if inner := AsMap(m["response"]); inner != nil {
 		m = inner
 	}
 	if err := payloadError(m); err != nil {
+		if upstream, ok := err.(*UpstreamError); ok && m["error"] != nil {
+			var envelope struct {
+				Response json.RawMessage `json:"response"`
+			}
+			if json.Unmarshal(data, &envelope) == nil && len(envelope.Response) > 0 {
+				upstream.retainRaw(envelope.Response)
+			}
+		}
 		return nil, err
 	}
 	return m, nil

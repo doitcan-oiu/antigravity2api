@@ -12,6 +12,7 @@ import (
 )
 
 const maxRequestBytes int64 = 32 << 20
+const proxyRevision = "2026-09-07.2"
 
 func (s *Server) initRuntime() {
 	s.runtimeOnce.Do(func() {
@@ -165,6 +166,7 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
 	active, pending := len(s.admission), len(s.pending)
 	writeJSON(w, http.StatusOK, map[string]any{
+		"proxy_revision":  proxyRevision,
 		"active_requests": active, "queued_requests": max(0, pending-active),
 		"max_concurrent_requests": cap(s.admission), "max_concurrent_per_account": s.cfg.MaxConcurrentPerAccount,
 		"upstream_attempts": s.upstreamAttempts.Load(), "upstream_429": s.upstream429.Load(),

@@ -516,3 +516,64 @@ func TestCanceledAcquireDoesNotWaitForAnotherSnapshotLoad(t *testing.T) {
 		t.Fatalf("snapshot wait ignored cancellation: %v", err)
 	}
 }
+
+func TestAcquireRechecksCooldownObservedDuringTokenRefresh(t *testing.T) {
+	for _, scope := range []string{"account", "model", "persistent"} {
+		t.Run(scope, func(t *testing.T) {
+			p, st, ids := fixture(t, 1, 4)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := p.InvalidateTokenContext(ctx, ids[0]); err != nil {
+				t.Fatal(err)
+			}
+			started := make(chan struct{})
+			resume := make(chan struct{})
+			p.refresh = func(ctx context.Context, _ string) (*oauth.TokenResponse, error) {
+				close(started)
+				select {
+				case <-resume:
+					return &oauth.TokenResponse{AccessToken: "synthetic-refreshed", ExpiresIn: 3600}, nil
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+			done := make(chan error, 1)
+			go func() {
+				_, release, err := p.Acquire(ctx, "model-a", "", nil)
+				if release != nil {
+					release()
+				}
+				done <- err
+			}()
+			select {
+			case <-started:
+			case <-ctx.Done():
+				t.Fatal("token refresh did not start")
+			}
+			until := time.Now().Add(time.Hour)
+			switch scope {
+			case "account":
+				p.MarkLimited(ids[0], "", until)
+			case "model":
+				p.MarkLimited(ids[0], "model-a", until)
+			case "persistent":
+				if err := st.MarkRateLimited(ids[0], until.Unix(), "synthetic limit"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			close(resume)
+			select {
+			case err := <-done:
+				var unavailable *UnavailableError
+				if !errors.As(err, &unavailable) || unavailable.RetryAfter < 59*time.Minute {
+					t.Fatalf("returned an account cooled during refresh or lost retry timing: %v", err)
+				}
+			case <-ctx.Done():
+				t.Fatal("Acquire did not finish after token refresh")
+			}
+			if active := p.RuntimeStates()[ids[0]].Active; active != 0 {
+				t.Fatalf("cooled reservation leaked: active=%d", active)
+			}
+		})
+	}
+}

@@ -286,7 +286,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, plan proxyPlan) {
 	var lastStatus int
 	var lastErr, lastEmail, lastID, mapped string
 	var retryAfter time.Duration
+	var lastBody []byte
+	var lastCategory, lastEndpoint string
+	omitPenalties := false
 	attempts := 0
+	totalAttempts := 0
 	maxAttempts := s.cfg.MaxRetryAttempts
 	// A grace retry or forced token refresh may reuse the reserved slot once without consuming rotation budget.
 	for attempts < maxAttempts || reuse != nil {
@@ -327,10 +331,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, plan proxyPlan) {
 			lastStatus, lastErr = 400, buildErr.Error()
 			break
 		}
+		if omitPenalties {
+			stripPenaltyFields(payload)
+		}
 		var resp *http.Response
 		var data []byte
 		attemptStartedAt := time.Now()
 		s.upstreamAttempts.Add(1)
+		totalAttempts++
 		if plan.count {
 			outer, ok := payload.(convert.OuterRequest)
 			if !ok {
@@ -373,7 +381,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, plan proxyPlan) {
 			if errors.As(err, &upstreamErr) && upstreamErr.Code >= 400 {
 				status = upstreamErr.Code
 			}
-			data, _ = json.Marshal(map[string]any{"error": map[string]any{"message": err.Error()}})
+			data = nil
+			if upstreamErr != nil {
+				data = upstreamErr.GetRaw()
+			}
+			if len(data) == 0 {
+				data, _ = json.Marshal(map[string]any{"error": map[string]any{"message": err.Error()}})
+			}
 		} else if status >= 300 {
 			if data == nil && resp.Body != nil {
 				data, err = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -387,6 +401,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, plan proxyPlan) {
 			s.upstream429.Add(1)
 		}
 		if err == nil && status >= 200 && status < 300 {
+			if omitPenalties {
+				w.Header().Set("X-Proxy-Parameter-Adjustments", "presence_penalty,frequency_penalty")
+			}
 			w.Header().Set("X-Mapped-Model", mapped)
 			w.Header().Set("X-Request-ID", middleware.GetReqID(ctx))
 			if plan.stream {
@@ -408,7 +425,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, plan proxyPlan) {
 						if logStatus == 429 {
 							s.upstream429.Add(1)
 						}
-						decision := retryPolicy(logStatus, make(http.Header), []byte(message), attempts-1)
+						rawError := upstreamErr.GetRaw()
+						if len(rawError) == 0 {
+							rawError = []byte(message)
+						}
+						decision := retryPolicy(logStatus, headers, rawError, attempts-1)
 						scope := ""
 						if decision.modelScoped {
 							scope = mapped
@@ -416,6 +437,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, plan proxyPlan) {
 						if decision.cooldown > 0 {
 							s.pool.MarkLimited(acc.ID, scope, time.Now().Add(decision.cooldown))
 						}
+						message = failureLog(message, rawError, decision.category, upstreamEndpoint(resp), totalAttempts)
 					}
 					if ctx.Err() != nil {
 						logStatus, message = contextFailure(ctx.Err())
@@ -455,6 +477,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, plan proxyPlan) {
 		}
 		lastStatus, lastErr = status, clipErr(data)
 		decision := retryPolicy(status, headers, data, attempts-1)
+		lastBody, lastCategory, lastEndpoint = data, decision.category, upstreamEndpoint(resp)
+		if !omitPenalties && isPenaltyRejection(status, data) && stripPenaltyFields(payload) {
+			omitPenalties = true
+			reuse, reuseRelease = acc, release
+			s.logAttempt(ctx, plan, mapped, acc.ID, totalAttempts, status, "unsupported_penalty", lastErr, 0, data, lastEndpoint)
+			continue
+		}
 		if status == 403 && (strings.Contains(strings.ToUpper(string(data)), "VALIDATION_REQUIRED") || strings.Contains(strings.ToUpper(string(data)), "PERMISSION_DENIED")) {
 			_ = s.store.SetForbidden(acc.ID, sanitizeError(lastErr))
 		}
@@ -465,7 +494,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, plan proxyPlan) {
 			if refreshErr := s.pool.InvalidateTokenContext(ctx, acc.ID); refreshErr == nil {
 				if fresh, refreshErr := s.pool.RefreshTokenContext(ctx, acc.ID); refreshErr == nil {
 					reuse, reuseRelease = fresh, release
-					s.logAttempt(ctx, plan, mapped, acc.ID, attempts, status, "refresh_access_token", lastErr, 0)
+					s.logAttempt(ctx, plan, mapped, acc.ID, totalAttempts, status, "refresh_access_token", lastErr, 0, data, lastEndpoint)
 					continue
 				}
 			}
@@ -477,7 +506,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, plan proxyPlan) {
 		if decision.cooldown > 0 {
 			s.pool.MarkLimited(acc.ID, scope, time.Now().Add(decision.cooldown))
 		}
-		s.logAttempt(ctx, plan, mapped, acc.ID, attempts, status, decision.category, lastErr, decision.delay)
+		s.logAttempt(ctx, plan, mapped, acc.ID, totalAttempts, status, decision.category, lastErr, decision.delay, data, lastEndpoint)
 		if !decision.retry {
 			release()
 			break
@@ -516,7 +545,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, plan proxyPlan) {
 	}
 	lastErr = sanitizeError(lastErr)
 	writeProxyError(w, plan.protocol, lastStatus, lastErr)
-	s.logReq(plan.protocol, plan.model, mapped, plan.mixed, lastID, lastEmail, lastStatus, plan.stream, start, lastErr, convert.StreamStats{})
+	s.logReq(plan.protocol, plan.model, mapped, plan.mixed, lastID, lastEmail, lastStatus, plan.stream, start, failureLog(lastErr, lastBody, lastCategory, lastEndpoint, totalAttempts), convert.StreamStats{})
 }
 
 func contextFailure(err error) (int, string) {
@@ -525,11 +554,11 @@ func contextFailure(err error) (int, string) {
 	}
 	return 499, "request canceled"
 }
-func (s *Server) logAttempt(ctx context.Context, plan proxyPlan, mapped, account string, attempt, status int, category, message string, delay time.Duration) {
+func (s *Server) logAttempt(ctx context.Context, plan proxyPlan, mapped, account string, attempt, status int, category, message string, delay time.Duration, raw []byte, endpoint string) {
 	if !s.loggingEnabled() {
 		return
 	}
-	slog.WarnContext(ctx, "upstream attempt failed", "request_id", middleware.GetReqID(ctx), "protocol", plan.protocol, "model", plan.model, "mapped_model", mapped, "account_id", account, "attempt", attempt, "status", status, "category", category, "retry_delay_ms", delay.Milliseconds(), "error", sanitizeError(message))
+	slog.WarnContext(ctx, "upstream attempt failed", "request_id", middleware.GetReqID(ctx), "protocol", plan.protocol, "model", plan.model, "mapped_model", mapped, "account_id", account, "attempt", attempt, "status", status, "category", category, "retry_delay_ms", delay.Milliseconds(), "error", sanitizeError(message), "endpoint", endpoint, "upstream_error", diagnosticErrorBody(raw))
 }
 
 func (s *Server) loggingEnabled() bool {

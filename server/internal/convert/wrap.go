@@ -148,6 +148,13 @@ func normalizeGenerationConfig(model string, gen any, image bool) map[string]any
 	if gc == nil {
 		gc = map[string]any{}
 	}
+	// Some internal models reject the presence of penalty fields even at zero.
+	// Zero is the neutral default, so omit it without changing generation intent.
+	for _, field := range []string{"presencePenalty", "frequencyPenalty", "presence_penalty", "frequency_penalty"} {
+		if value, ok := gc[field]; ok && isZeroPenalty(value) {
+			delete(gc, field)
+		}
+	}
 	if image {
 		delete(gc, "responseMimeType")
 		delete(gc, "responseModalities")
@@ -195,6 +202,24 @@ func normalizeGenerationConfig(model string, gen any, image bool) map[string]any
 	}
 	gc["maxOutputTokens"] = maxTokens
 	return gc
+}
+
+func isZeroPenalty(value any) bool {
+	switch n := value.(type) {
+	case float64:
+		return n == 0
+	case float32:
+		return n == 0
+	case int:
+		return n == 0
+	case int64:
+		return n == 0
+	case json.Number:
+		f, err := n.Float64()
+		return err == nil && f == 0
+	default:
+		return false
+	}
 }
 
 func thinkingBudgetFromLevel(model, level string) int {

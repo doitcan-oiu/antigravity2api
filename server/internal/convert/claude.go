@@ -77,6 +77,7 @@ func ClaudeToGeminiWithModel(req ClaudeRequest, projectID, email, accountID, fin
 		gen["maxOutputTokens"] = *req.MaxTokens
 	}
 	applyThinking(gen, mapped, req.Thinking, effort)
+	applyVariantGeneration(gen, req.Model, mapped)
 	setStop(gen, req.StopSequences)
 	if format := AsMap(GetPath(req.OutputConfig, "format")); format != nil && AsString(format["type"]) == "json_schema" {
 		gen["responseMimeType"] = "application/json"
@@ -84,8 +85,8 @@ func ClaudeToGeminiWithModel(req ClaudeRequest, projectID, email, accountID, fin
 	}
 	session := SessionID(accountID, AsString(GetPath(req.Metadata, "user_id")))
 	inner := InnerRequest{Contents: mergeContents(contents), GenerationConfig: gen, SafetySettings: SafetyOff(), SessionID: session}
-	if system := extractText(req.System); system != "" {
-		inner.SystemInstruction = map[string]any{"role": "system", "parts": []any{map[string]any{"text": system}}}
+	if parts := claudeSystemParts(req.System); len(parts) > 0 {
+		inner.SystemInstruction = map[string]any{"role": "system", "parts": parts}
 	}
 	attachTools(&inner, claudeTools(tools), tools, req.ToolChoice, req.Model)
 	if IsImageModel(mapped) {
@@ -93,6 +94,37 @@ func ClaudeToGeminiWithModel(req ClaudeRequest, projectID, email, accountID, fin
 	}
 	return Wrap(projectID, mapped, email, session, inner, IsImageModel(mapped)), mapped, req.Stream
 }
+
+const claudeAgentSDKIdentity = "You are a Claude agent, built on Anthropic's Claude Agent SDK."
+const claudeCodeCLIIdentity = "You are Claude Code, Anthropic's official CLI for Claude."
+
+func claudeSystemParts(system any) []any {
+	var texts []string
+	switch value := system.(type) {
+	case string:
+		texts = append(texts, value)
+	case map[string]any:
+		texts = append(texts, AsString(value["text"]))
+	default:
+		for _, block := range AsSlice(system) {
+			texts = append(texts, AsString(GetPath(block, "text")))
+		}
+	}
+	var parts []any
+	for _, text := range texts {
+		if text == "" {
+			continue
+		}
+		// Match only the standalone SDK identity, before joining system blocks.
+		// The demo documents RESOURCE_EXHAUSTED for this exact client identity.
+		if text == claudeAgentSDKIdentity {
+			text = claudeCodeCLIIdentity
+		}
+		parts = append(parts, map[string]any{"text": text})
+	}
+	return parts
+}
+
 func claudeContentToParts(content any, isModel bool) []any {
 	return claudeParts(content, isModel, nil, "")
 }

@@ -257,11 +257,11 @@ func IsImageModel(model string) bool {
 func DefaultThinkingBudget(model string) int {
 	m := strings.ToLower(model)
 	switch m {
-	case "gemini-3.7-flash-low", "gemini-3.5-flash-extra-low":
+	case "gemini-3.7-flash-low", "gemini-3.6-flash-low", "gemini-3.5-flash-extra-low":
 		return 1000
-	case "gemini-3.7-flash-medium", "gemini-3.5-flash-low":
+	case "gemini-3.7-flash-medium", "gemini-3.6-flash-medium", "gemini-3.5-flash-low":
 		return 4000
-	case "gemini-3.7-flash-high", "gemini-3-flash-agent":
+	case "gemini-3.7-flash-high", "gemini-3.6-flash-high", "gemini-3-flash-agent":
 		return 10000
 	case "gemini-3.1-pro-low", "gemini-3-pro-low":
 		return 1001
